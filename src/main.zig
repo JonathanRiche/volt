@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const testing = std.testing;
 
 const Allocator = std.mem.Allocator;
@@ -191,6 +192,7 @@ fn printUsage() !void {
         "Dispatch placeholders (for --dispatch args):\n" ++
         "  {message} / {text}, {chat_id}, {account}, {session}\n" ++
         "Use --zolt to run messages through: zolt --session {session} --message {message}.\n" ++
+        "Resolution order for --zolt is: --zolt-path/VOLT_ZOLT_PATH, bundled volt/zolt, then system PATH.\n" ++
         "Set --zolt-path explicitly or the `VOLT_ZOLT_PATH` env var to point at a specific binary.\n" ++
         "\n" ++
         "Examples:\n" ++
@@ -465,19 +467,19 @@ fn runTelegramGateway(allocator: Allocator, opts: TelegramRunOptions) !void {
         validateDispatchExecutable(allocator, zolt_cmd) catch |err| {
             switch (err) {
                 error.DispatchBinaryNotFound => {
-                    try std.fs.File.stderr().writer().print(
+                    try std.fs.File.stderr().deprecatedWriter().print(
                         "volt: dispatch binary not found: {s}\n",
                         .{zolt_cmd},
                     );
                 },
                 error.DispatchBinaryNotExecutable => {
-                    try std.fs.File.stderr().writer().print(
+                    try std.fs.File.stderr().deprecatedWriter().print(
                         "volt: dispatch binary not executable: {s}\n",
                         .{zolt_cmd},
                     );
                 },
                 else => {
-                    try std.fs.File.stderr().writer().print(
+                    try std.fs.File.stderr().deprecatedWriter().print(
                         "volt: dispatch validation failed: {s}\n",
                         .{@errorName(err)},
                     );
@@ -494,19 +496,19 @@ fn runTelegramGateway(allocator: Allocator, opts: TelegramRunOptions) !void {
         validateDispatchExecutable(allocator, dispatch.argv[0]) catch |err| {
             switch (err) {
                 error.DispatchBinaryNotFound => {
-                    try std.fs.File.stderr().writer().print(
+                    try std.fs.File.stderr().deprecatedWriter().print(
                         "volt: dispatch binary not found: {s}\n",
                         .{dispatch.argv[0]},
                     );
                 },
                 error.DispatchBinaryNotExecutable => {
-                    try std.fs.File.stderr().writer().print(
+                    try std.fs.File.stderr().deprecatedWriter().print(
                         "volt: dispatch binary not executable: {s}\n",
                         .{dispatch.argv[0]},
                     );
                 },
                 else => {
-                    try std.fs.File.stderr().writer().print(
+                    try std.fs.File.stderr().deprecatedWriter().print(
                         "volt: dispatch validation failed: {s}\n",
                         .{@errorName(err)},
                     );
@@ -616,10 +618,35 @@ fn resolveZoltCommand(allocator: Allocator, explicit: ?[]const u8) ![]u8 {
 
     return std.process.getEnvVarOwned(allocator, "VOLT_ZOLT_PATH") catch |err| {
         if (err == error.EnvironmentVariableNotFound) {
-            return allocator.dupe(u8, "zolt");
+            if (resolveBundledZoltCommand(allocator)) |command| {
+                return command;
+            }
+            return allocator.dupe(u8, defaultZoltBinaryName());
         }
         return err;
     };
+}
+
+fn resolveBundledZoltCommand(allocator: Allocator) ?[]u8 {
+    const exe_dir = std.fs.selfExeDirPathAlloc(allocator) catch return null;
+    defer allocator.free(exe_dir);
+
+    const candidate = joinPath(
+        allocator,
+        exe_dir,
+        defaultZoltBinaryName(),
+    ) catch return null;
+
+    if (!pathExists(candidate)) {
+        allocator.free(candidate);
+        return null;
+    }
+
+    return candidate;
+}
+
+fn defaultZoltBinaryName() []const u8 {
+    return if (builtin.os.tag == .windows) "zolt.exe" else "zolt";
 }
 
 fn parseTelegramSetupOptions(allocator: Allocator, args: []const []const u8) !TelegramSetupOptions {
@@ -1197,6 +1224,7 @@ fn executeDispatchCommand(allocator: Allocator, argv: []const []const u8, ctx: T
 const DispatchValidationError = error{
     DispatchBinaryNotFound,
     DispatchBinaryNotExecutable,
+    DispatchBinaryCheckFailed,
 };
 
 fn validateDispatchExecutable(allocator: Allocator, command: []const u8) DispatchValidationError!void {
@@ -1205,16 +1233,20 @@ fn validateDispatchExecutable(allocator: Allocator, command: []const u8) Dispatc
         .allocator = allocator,
         .argv = &probe_argv,
     }) catch |err| {
-        switch (err) {
-            error.FileNotFound, error.InvalidArg0 => return DispatchValidationError.DispatchBinaryNotFound,
-            error.AccessDenied, error.InvalidExe => return DispatchValidationError.DispatchBinaryNotExecutable,
-            else => return err,
-        }
+        return mapDispatchValidationError(err);
     };
     defer {
         allocator.free(result.stdout);
         allocator.free(result.stderr);
     }
+}
+
+fn mapDispatchValidationError(err: anyerror) DispatchValidationError {
+    return switch (err) {
+        error.FileNotFound => DispatchValidationError.DispatchBinaryNotFound,
+        error.AccessDenied, error.PermissionDenied, error.InvalidExe => DispatchValidationError.DispatchBinaryNotExecutable,
+        else => DispatchValidationError.DispatchBinaryCheckFailed,
+    };
 }
 
 fn renderDispatchArgv(allocator: Allocator, argv: []const []const u8, ctx: TelegramDispatchContext) ![]const []const u8 {

@@ -46,7 +46,11 @@ volt --telegram [--token <token>] [--account <id>] [--home <path>] [--dispatch <
 `--zolt-path <path>` sets the exact executable used for zolt mode, overriding `zolt` in PATH.
 You can also set `VOLT_ZOLT_PATH`.
 
-`--zolt` requires `zolt` to be installed and discoverable in `PATH` on the host machine.
+`--zolt` resolves command precedence in this order:
+
+1. `--zolt-path` / `VOLT_ZOLT_PATH` override
+2. bundled `zolt` installed next to `volt`
+3. `zolt` on `PATH`
 
 Available placeholders in `--dispatch` values:
 
@@ -86,6 +90,13 @@ Running `volt` with no args starts local command passthrough mode (read a line f
 - `OPENCLAW_STATE_DIR` / `CLAWDBOT_STATE_DIR`
 - `OPENCLAW_CONFIG_PATH` / `CLAWDBOT_CONFIG_PATH`
 - `TELEGRAM_BOT_TOKEN`
+- `VOLT_ZOLT_PATH`
+
+## Build flags
+
+- `-Dwith-zolt` (default true): build and install zolt as part of `zig build install`.
+- `-Dzolt-source=<path>`: use a local zolt checkout (default `../zig-ai` if present).
+- If you keep a `zolt` checkout at `../zig-ai`, Volt auto-discovers it and vendors it.
 
 ## Multi-account examples
 
