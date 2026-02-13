@@ -34,10 +34,14 @@ Notes:
 Run the Telegram polling loop.
 
 ```bash
-volt --telegram [--token <token>] [--account <id>] [--home <path>] [--dispatch <command>] [--poll-ms <ms>]
+volt --telegram [--token <token>] [--account <id>] [--home <path>] [--dispatch <command>] [--zolt] [--poll-ms <ms>]
 ```
 
 `--dispatch` runs as parsed argv tokens, not shell text.
+
+`--zolt` enables a preset dispatch mapping to:
+
+`zolt --session {session} --message {message}`
 
 Available placeholders in `--dispatch` values:
 
@@ -60,6 +64,12 @@ Example:
 
 ```bash
 volt --telegram --dispatch "zolt --session {session} --message {message}"
+```
+
+or equivalent:
+
+```bash
+volt --telegram --zolt
 ```
 
 ### No args

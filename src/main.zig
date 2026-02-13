@@ -114,9 +114,12 @@ const TelegramRunOptions = struct {
     home_path: ?[]const u8,
     token: ?[]const u8,
     dispatch: ?[]const u8,
+    zolt: bool,
     poll_ms: u64,
     account: ?[]const u8,
 };
+
+const DefaultZoltDispatch = "zolt --session {session} --message {message}";
 
 const DispatchMode = enum { shell, argv };
 
@@ -181,10 +184,11 @@ fn printUsage() !void {
         "Usage:\n" ++
         "  volt init [--mirror-openclaw] [--source <path>] [--home <path>] [--force]\n" ++
         "  volt telegram setup --token <token> [--account <id>] [--allow-from <chat_id>]... [--home <path>] [--force]\n" ++
-        "  volt --telegram [--token <token>] [--account <id>] [--home <path>] [--dispatch <command>] [--poll-ms <ms>]\n" ++
+        "  volt --telegram [--token <token>] [--account <id>] [--home <path>] [--dispatch <command>] [--zolt] [--poll-ms <ms>]\n" ++
         "\n" ++
         "Dispatch placeholders (for --dispatch args):\n" ++
         "  {message} / {text}, {chat_id}, {account}, {session}\n" ++
+        "Use --zolt to run messages through: zolt --session {session} --message {message}\n" ++
         "\n" ++
         "Examples:\n" ++
         "  volt init --mirror-openclaw --source /home/rtg/.openclaw\n" ++
@@ -444,7 +448,7 @@ fn runTelegramGateway(allocator: Allocator, opts: TelegramRunOptions) !void {
     defer allowed.deinit();
     const allow_list = allowed.value.allowFrom;
 
-    const dispatch = try parseDispatchPlan(allocator, opts.dispatch);
+    const dispatch = try parseDispatchPlan(allocator, if (opts.zolt) DefaultZoltDispatch else opts.dispatch);
     defer deinitDispatchPlan(allocator, dispatch);
 
     var client = std.http.Client{ .allocator = allocator };
@@ -596,6 +600,7 @@ fn parseTelegramRunOptions(args: []const []const u8) !TelegramRunOptions {
         .home_path = null,
         .token = null,
         .dispatch = null,
+        .zolt = false,
         .account = null,
         .poll_ms = 2500,
     };
@@ -623,8 +628,18 @@ fn parseTelegramRunOptions(args: []const []const u8) !TelegramRunOptions {
         }
         if (std.mem.eql(u8, arg, "--dispatch")) {
             if (idx + 1 >= args.len) return error.UnexpectedArgument;
+            if (result.zolt) {
+                return error.UnexpectedArgument;
+            }
             result.dispatch = args[idx + 1];
             idx += 1;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--zolt")) {
+            if (result.dispatch != null) {
+                return error.UnexpectedArgument;
+            }
+            result.zolt = true;
             continue;
         }
         if (std.mem.eql(u8, arg, "--poll-ms")) {
@@ -1616,6 +1631,37 @@ test "parseDispatchPlan keeps shell behavior for missing dispatch" {
 
     try testing.expect(plan.mode == .shell);
     try testing.expect(plan.argv.len == 0);
+}
+
+test "parseTelegramRunOptions supports --zolt flag" {
+    const opts = try parseTelegramRunOptions(&.{"--zolt"});
+    try testing.expect(opts.zolt);
+    try testing.expect(opts.dispatch == null);
+    try testing.expect(opts.poll_ms == 2500);
+    try testing.expect(opts.account == null);
+}
+
+test "parseTelegramRunOptions rejects --zolt combined with --dispatch" {
+    try testing.expectError(
+        error.UnexpectedArgument,
+        parseTelegramRunOptions(&.{ "--zolt", "--dispatch", "zolt --message {message}" }),
+    );
+}
+
+test "parseTelegramRunOptions sets default dispatch command when --zolt enabled" {
+    const allocator = testing.allocator;
+    const opts = try parseTelegramRunOptions(&.{"--zolt"});
+
+    const dispatch = try parseDispatchPlan(allocator, if (opts.zolt) DefaultZoltDispatch else opts.dispatch);
+    defer deinitDispatchPlan(allocator, dispatch);
+
+    try testing.expect(dispatch.mode == .argv);
+    try testing.expect(dispatch.argv.len == 5);
+    try testing.expectEqualStrings("zolt", dispatch.argv[0]);
+    try testing.expectEqualStrings("--session", dispatch.argv[1]);
+    try testing.expectEqualStrings("{session}", dispatch.argv[2]);
+    try testing.expectEqualStrings("--message", dispatch.argv[3]);
+    try testing.expectEqualStrings("{message}", dispatch.argv[4]);
 }
 
 test "dispatch rendering replaces session placeholders" {
