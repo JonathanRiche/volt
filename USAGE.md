@@ -54,3 +54,47 @@ Running `volt` with no args starts local command passthrough mode (read a line f
 - `OPENCLAW_STATE_DIR` / `CLAWDBOT_STATE_DIR`
 - `OPENCLAW_CONFIG_PATH` / `CLAWDBOT_CONFIG_PATH`
 - `TELEGRAM_BOT_TOKEN`
+
+## Multi-account examples
+
+Use `--account` to configure and run separate Telegram bots/accounts against one state dir.
+
+### Setup default account
+
+```bash
+volt telegram setup --home ~/.openclaw --token "<default_bot_token>"
+```
+
+This writes:
+- `channels.telegram.botToken` for the default account.
+- `telegram/update-offset-default.json` for runtime state.
+
+### Setup a named account
+
+```bash
+volt telegram setup --home ~/.openclaw --account work --token "<work_bot_token>"
+```
+
+This writes:
+- `channels.telegram.accounts.work.botToken` for the normalized account ID.
+- `telegram/update-offset-work.json` for runtime state.
+
+### Run default account in gateway mode
+
+```bash
+volt --telegram --home ~/.openclaw
+```
+
+### Run a named account in gateway mode
+
+```bash
+volt --telegram --home ~/.openclaw --account work
+```
+
+### Use account-specific allow list while keeping separate default allow list
+
+```bash
+volt telegram setup --home ~/.openclaw --account work --token "<work_bot_token>" --allow-from 111111111 --allow-from 222222222
+```
+
+This stores the allowlist in the shared `credentials/telegram-allowFrom.json` used by gateway runtime.
