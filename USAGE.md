@@ -37,6 +37,17 @@ Run the Telegram polling loop.
 volt --telegram [--token <token>] [--account <id>] [--home <path>] [--dispatch <command>] [--poll-ms <ms>]
 ```
 
+`--dispatch` runs as parsed argv tokens, not shell text.
+
+Available placeholders in `--dispatch` values:
+
+- `{message}` / `{text}`: incoming Telegram message text
+- `{chat_id}`: Telegram chat id
+- `{account}`: normalized account id
+- `{session}`: derived `telegram:<account>:<chat_id>` session key
+
+If `{message}`/`{text}` is not present, Volt appends the message text as the final argv entry.
+
 If `--token` is omitted, token resolution is:
 
 1. account-specific `channels.telegram.accounts.<account>.tokenFile`
@@ -44,6 +55,12 @@ If `--token` is omitted, token resolution is:
 3. default `channels.telegram.tokenFile`
 4. default `channels.telegram.botToken`
 5. `TELEGRAM_BOT_TOKEN`
+
+Example:
+
+```bash
+volt --telegram --dispatch "zolt --session {session} --message {message}"
+```
 
 ### No args
 

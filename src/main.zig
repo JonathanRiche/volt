@@ -118,6 +118,20 @@ const TelegramRunOptions = struct {
     account: ?[]const u8,
 };
 
+const DispatchMode = enum { shell, argv };
+
+const DispatchPlan = struct {
+    mode: DispatchMode = .shell,
+    argv: []const []const u8 = &.{},
+};
+
+const TelegramDispatchContext = struct {
+    message: []const u8,
+    account: []const u8,
+    chat_id: i64,
+    session_key: []const u8,
+};
+
 const TelegramOffset = struct {
     version: u32 = 1,
     lastUpdateId: i64 = 0,
@@ -169,10 +183,13 @@ fn printUsage() !void {
         "  volt telegram setup --token <token> [--account <id>] [--allow-from <chat_id>]... [--home <path>] [--force]\n" ++
         "  volt --telegram [--token <token>] [--account <id>] [--home <path>] [--dispatch <command>] [--poll-ms <ms>]\n" ++
         "\n" ++
+        "Dispatch placeholders (for --dispatch args):\n" ++
+        "  {message} / {text}, {chat_id}, {account}, {session}\n" ++
+        "\n" ++
         "Examples:\n" ++
         "  volt init --mirror-openclaw --source /home/rtg/.openclaw\n" ++
         "  volt telegram setup --token 123:ABC --account work --allow-from 8257801789\n" ++
-        "  volt --telegram --dispatch \"zolt\"\n");
+        "  volt --telegram --dispatch \"zolt --session {session} --message {message}\"\n");
 }
 
 pub fn main() !void {
@@ -427,6 +444,9 @@ fn runTelegramGateway(allocator: Allocator, opts: TelegramRunOptions) !void {
     defer allowed.deinit();
     const allow_list = allowed.value.allowFrom;
 
+    const dispatch = try parseDispatchPlan(allocator, opts.dispatch);
+    defer deinitDispatchPlan(allocator, dispatch);
+
     var client = std.http.Client{ .allocator = allocator };
     defer client.deinit();
 
@@ -447,7 +467,17 @@ fn runTelegramGateway(allocator: Allocator, opts: TelegramRunOptions) !void {
                 const text = message.text orelse continue;
                 if (!chatAllowed(allow_list, chat.id)) continue;
 
-                const output = executeShellCommandWithDispatch(allocator, opts.dispatch, text) catch |err| {
+                const session_key = try std.fmt.allocPrint(allocator, "telegram:{s}:{d}", .{ account, chat.id });
+                defer allocator.free(session_key);
+
+                const dispatch_ctx = TelegramDispatchContext{
+                    .message = text,
+                    .account = account,
+                    .chat_id = chat.id,
+                    .session_key = session_key,
+                };
+
+                const output = executeDispatchForTelegram(allocator, dispatch, dispatch_ctx) catch |err| {
                     const error_msg = try std.fmt.allocPrint(allocator, "command failed: {s}", .{@errorName(err)});
                     defer allocator.free(error_msg);
                     try sendTelegramMessage(allocator, &client, token, chat.id, error_msg);
@@ -944,14 +974,195 @@ fn renderAllowFromJson(allocator: Allocator, allow: []const []const u8) ![]u8 {
     return out.toOwnedSlice(allocator);
 }
 
-fn executeShellCommandWithDispatch(allocator: Allocator, dispatch: ?[]const u8, text: []const u8) ![]u8 {
-    const command = if (dispatch) |prefix|
-        try std.fmt.allocPrint(allocator, "{s} {s}", .{ prefix, text })
-    else
-        try allocator.dupe(u8, text);
-    defer allocator.free(command);
+fn parseDispatchPlan(allocator: Allocator, dispatch: ?[]const u8) !DispatchPlan {
+    const raw = std.mem.trim(u8, dispatch orelse "", " \t\r\n");
+    if (raw.len == 0) {
+        return DispatchPlan{};
+    }
 
-    return executeShellCommand(allocator, command);
+    const argv = try parseCommandLineTokens(allocator, raw);
+    if (argv.len == 0) {
+        return DispatchPlan{};
+    }
+
+    return DispatchPlan{
+        .mode = .argv,
+        .argv = argv,
+    };
+}
+
+fn deinitDispatchPlan(allocator: Allocator, plan: DispatchPlan) void {
+    if (plan.mode != .argv) return;
+    for (plan.argv) |entry| {
+        allocator.free(entry);
+    }
+    allocator.free(plan.argv);
+}
+
+fn parseCommandLineTokens(allocator: Allocator, input: []const u8) ![]const []const u8 {
+    var tokens = std.mem.tokenizeAny(u8, input, " \t\r\n");
+    var out = std.ArrayListUnmanaged([]const u8){};
+    defer out.deinit(allocator);
+
+    while (tokens.next()) |raw_token| {
+        const token = try stripTokenQuotes(allocator, raw_token);
+        try out.append(allocator, token);
+    }
+
+    return out.toOwnedSlice(allocator);
+}
+
+fn stripTokenQuotes(allocator: Allocator, token: []const u8) ![]u8 {
+    const len = token.len;
+    if (len >= 2 and
+        ((token[0] == '"' and token[len - 1] == '"') or
+            (token[0] == '\'' and token[len - 1] == '\'')))
+    {
+        return try allocator.dupe(u8, token[1 .. len - 1]);
+    }
+
+    return try allocator.dupe(u8, token);
+}
+
+fn executeDispatchForTelegram(allocator: Allocator, plan: DispatchPlan, ctx: TelegramDispatchContext) ![]u8 {
+    return switch (plan.mode) {
+        .shell => executeShellCommand(allocator, ctx.message),
+        .argv => executeDispatchCommand(allocator, plan.argv, ctx),
+    };
+}
+
+fn executeDispatchCommand(allocator: Allocator, argv: []const []const u8, ctx: TelegramDispatchContext) ![]u8 {
+    if (argv.len == 0) {
+        return error.InvalidArgument;
+    }
+
+    const context_argv = try renderDispatchArgv(allocator, argv, ctx);
+    defer {
+        for (context_argv) |arg| {
+            allocator.free(arg);
+        }
+        allocator.free(context_argv);
+    }
+
+    const result = try std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = context_argv,
+    });
+    defer {
+        allocator.free(result.stdout);
+        allocator.free(result.stderr);
+    }
+
+    var out = std.ArrayListUnmanaged(u8){};
+    defer out.deinit(allocator);
+
+    try out.appendSlice(allocator, result.stdout);
+
+    if (result.stderr.len > 0) {
+        if (out.items.len > 0) try out.appendSlice(allocator, "\n");
+        try out.appendSlice(allocator, "[stderr]\n");
+        try out.appendSlice(allocator, result.stderr);
+    }
+
+    switch (result.term) {
+        .Exited => |code| {
+            if (code != 0) {
+                const code_text = try std.fmt.allocPrint(allocator, "[exit={d}]", .{code});
+                defer allocator.free(code_text);
+                if (out.items.len > 0) try out.appendSlice(allocator, "\n");
+                try out.appendSlice(allocator, code_text);
+            }
+        },
+        .Signal => {
+            if (out.items.len > 0) try out.appendSlice(allocator, "\n");
+            try out.appendSlice(allocator, "[signal]\n");
+        },
+        .Stopped => {
+            if (out.items.len > 0) try out.appendSlice(allocator, "\n");
+            try out.appendSlice(allocator, "[stopped]\n");
+        },
+        .Unknown => {
+            if (out.items.len > 0) try out.appendSlice(allocator, "\n");
+            try out.appendSlice(allocator, "[unknown]\n");
+        },
+    }
+
+    return out.toOwnedSlice(allocator);
+}
+
+fn renderDispatchArgv(allocator: Allocator, argv: []const []const u8, ctx: TelegramDispatchContext) ![]const []const u8 {
+    var rendered = std.ArrayListUnmanaged([]const u8){};
+    defer rendered.deinit(allocator);
+
+    var message_included = false;
+    for (argv) |arg| {
+        const rendered_arg = try renderDispatchArg(allocator, arg, ctx, &message_included);
+        try rendered.append(allocator, rendered_arg);
+    }
+
+    if (!message_included) {
+        try rendered.append(allocator, try allocator.dupe(u8, ctx.message));
+    }
+
+    return rendered.toOwnedSlice(allocator);
+}
+
+fn renderDispatchArg(
+    allocator: Allocator,
+    template: []const u8,
+    ctx: TelegramDispatchContext,
+    message_included: *bool,
+) ![]u8 {
+    var out = std.ArrayListUnmanaged(u8){};
+    defer out.deinit(allocator);
+
+    var start: usize = 0;
+    while (start < template.len) {
+        if (template[start] != '{') {
+            try out.append(allocator, template[start]);
+            start += 1;
+            continue;
+        }
+
+        const close = std.mem.indexOfScalarPos(u8, template, start + 1, '}') orelse {
+            try out.appendSlice(allocator, template[start..]);
+            break;
+        };
+        const token = template[start + 1 .. close];
+
+        if (std.mem.eql(u8, token, "message") or std.mem.eql(u8, token, "text"))
+            try appendValue(&out, allocator, ctx.message, message_included, true)
+        else if (std.mem.eql(u8, token, "chat_id")) appendChatId: {
+            const chat_id_text = try std.fmt.allocPrint(allocator, "{d}", .{ctx.chat_id});
+            defer allocator.free(chat_id_text);
+            try appendValue(&out, allocator, chat_id_text, message_included, false);
+            break :appendChatId;
+        } else if (std.mem.eql(u8, token, "account"))
+            try appendValue(&out, allocator, ctx.account, message_included, false)
+        else if (std.mem.eql(u8, token, "session"))
+            try appendValue(&out, allocator, ctx.session_key, message_included, false)
+        else {
+            try out.appendSlice(allocator, template[start .. close + 1]);
+        }
+
+        start = close + 1;
+    }
+
+    if (out.items.len == 0) {
+        return try allocator.dupe(u8, template);
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+fn appendValue(
+    out: *std.ArrayListUnmanaged(u8),
+    allocator: Allocator,
+    value: []const u8,
+    message_included: *bool,
+    is_message: bool,
+) !void {
+    try out.appendSlice(allocator, value);
+    if (is_message) message_included.* = true;
 }
 
 fn executeShellCommand(allocator: Allocator, command: []const u8) ![]u8 {
@@ -1395,4 +1606,43 @@ test "resolveTelegramTokenFromConfig supports tokenFile, botToken, and normalize
     );
     defer allocator.free(default_token);
     try testing.expect(std.mem.eql(u8, default_token, "from-file"));
+}
+
+test "parseDispatchPlan keeps shell behavior for missing dispatch" {
+    const allocator = testing.allocator;
+
+    const plan = try parseDispatchPlan(allocator, null);
+    defer deinitDispatchPlan(allocator, plan);
+
+    try testing.expect(plan.mode == .shell);
+    try testing.expect(plan.argv.len == 0);
+}
+
+test "dispatch rendering replaces session placeholders" {
+    const allocator = testing.allocator;
+
+    const plan = try parseDispatchPlan(allocator, "zolt --session {session} --reply-to {chat_id} --account {account} {message}");
+    defer deinitDispatchPlan(allocator, plan);
+
+    const ctx = TelegramDispatchContext{
+        .message = "status update",
+        .account = "work",
+        .chat_id = 123456,
+        .session_key = "telegram:work:123456",
+    };
+
+    const rendered = try renderDispatchArgv(allocator, plan.argv, ctx);
+    defer {
+        for (rendered) |entry| allocator.free(entry);
+        allocator.free(rendered);
+    }
+
+    try testing.expectEqualStrings("zolt", rendered[0]);
+    try testing.expectEqualStrings("--session", rendered[1]);
+    try testing.expectEqualStrings("telegram:work:123456", rendered[2]);
+    try testing.expectEqualStrings("--reply-to", rendered[3]);
+    try testing.expectEqualStrings("123456", rendered[4]);
+    try testing.expectEqualStrings("--account", rendered[5]);
+    try testing.expectEqualStrings("work", rendered[6]);
+    try testing.expectEqualStrings("status update", rendered[7]);
 }
