@@ -43,6 +43,8 @@ volt --telegram [--token <token>] [--account <id>] [--home <path>] [--dispatch <
 
 `zolt --session {session} --message {message}`
 
+`--zolt` requires `zolt` to be installed and discoverable in `PATH` on the host machine.
+
 Available placeholders in `--dispatch` values:
 
 - `{message}` / `{text}`: incoming Telegram message text

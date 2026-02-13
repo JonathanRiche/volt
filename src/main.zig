@@ -170,6 +170,7 @@ const DefaultPairingJson = "{\"version\":1,\"requests\":[]}";
 const DefaultUpdateCheckJson = "{\"lastCheckedAt\":\"1970-01-01T00:00:00.000Z\"}";
 const DefaultGatewayToken = "volt-gateway-token";
 const DefaultAccountId = "default";
+const DefaultCommandCheckArgv = [_][]const u8{"--help"};
 
 fn isHelp(arg: []const u8) bool {
     return std.mem.eql(u8, arg, "--help") or
@@ -188,7 +189,7 @@ fn printUsage() !void {
         "\n" ++
         "Dispatch placeholders (for --dispatch args):\n" ++
         "  {message} / {text}, {chat_id}, {account}, {session}\n" ++
-        "Use --zolt to run messages through: zolt --session {session} --message {message}\n" ++
+        "Use --zolt to run messages through: zolt --session {session} --message {message} (zolt must be in PATH)\n" ++
         "\n" ++
         "Examples:\n" ++
         "  volt init --mirror-openclaw --source /home/rtg/.openclaw\n" ++
@@ -450,6 +451,32 @@ fn runTelegramGateway(allocator: Allocator, opts: TelegramRunOptions) !void {
 
     const dispatch = try parseDispatchPlan(allocator, if (opts.zolt) DefaultZoltDispatch else opts.dispatch);
     defer deinitDispatchPlan(allocator, dispatch);
+
+    if (dispatch.mode == .argv and dispatch.argv.len > 0) {
+        validateDispatchExecutable(allocator, dispatch.argv[0]) catch |err| {
+            switch (err) {
+                error.DispatchBinaryNotFound => {
+                    try std.fs.File.stderr().writer().print(
+                        "volt: dispatch binary not found: {s}\n",
+                        .{dispatch.argv[0]},
+                    );
+                },
+                error.DispatchBinaryNotExecutable => {
+                    try std.fs.File.stderr().writer().print(
+                        "volt: dispatch binary not executable: {s}\n",
+                        .{dispatch.argv[0]},
+                    );
+                },
+                else => {
+                    try std.fs.File.stderr().writer().print(
+                        "volt: dispatch validation failed: {s}\n",
+                        .{@errorName(err)},
+                    );
+                },
+            }
+            return err;
+        };
+    }
 
     var client = std.http.Client{ .allocator = allocator };
     defer client.deinit();
@@ -1103,6 +1130,29 @@ fn executeDispatchCommand(allocator: Allocator, argv: []const []const u8, ctx: T
     }
 
     return out.toOwnedSlice(allocator);
+}
+
+const DispatchValidationError = error{
+    DispatchBinaryNotFound,
+    DispatchBinaryNotExecutable,
+};
+
+fn validateDispatchExecutable(allocator: Allocator, command: []const u8) DispatchValidationError!void {
+    const probe_argv = [_][]const u8{ command, DefaultCommandCheckArgv[0] };
+    const result = std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &probe_argv,
+    }) catch |err| {
+        switch (err) {
+            error.FileNotFound, error.InvalidArg0 => return DispatchValidationError.DispatchBinaryNotFound,
+            error.AccessDenied, error.InvalidExe => return DispatchValidationError.DispatchBinaryNotExecutable,
+            else => return err,
+        }
+    };
+    defer {
+        allocator.free(result.stdout);
+        allocator.free(result.stderr);
+    }
 }
 
 fn renderDispatchArgv(allocator: Allocator, argv: []const []const u8, ctx: TelegramDispatchContext) ![]const []const u8 {
