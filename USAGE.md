@@ -43,6 +43,9 @@ volt --telegram [--token <token>] [--account <id>] [--home <path>] [--dispatch <
 
 `zolt --session {session} --message {message}`
 
+`--zolt-path <path>` sets the exact executable used for zolt mode, overriding `zolt` in PATH.
+You can also set `VOLT_ZOLT_PATH`.
+
 `--zolt` requires `zolt` to be installed and discoverable in `PATH` on the host machine.
 
 Available placeholders in `--dispatch` values:

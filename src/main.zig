@@ -115,6 +115,7 @@ const TelegramRunOptions = struct {
     token: ?[]const u8,
     dispatch: ?[]const u8,
     zolt: bool,
+    zolt_command: ?[]const u8,
     poll_ms: u64,
     account: ?[]const u8,
 };
@@ -185,11 +186,12 @@ fn printUsage() !void {
         "Usage:\n" ++
         "  volt init [--mirror-openclaw] [--source <path>] [--home <path>] [--force]\n" ++
         "  volt telegram setup --token <token> [--account <id>] [--allow-from <chat_id>]... [--home <path>] [--force]\n" ++
-        "  volt --telegram [--token <token>] [--account <id>] [--home <path>] [--dispatch <command>] [--zolt] [--poll-ms <ms>]\n" ++
+        "  volt --telegram [--token <token>] [--account <id>] [--home <path>] [--dispatch <command>] [--zolt] [--zolt-path <path>] [--poll-ms <ms>]\n" ++
         "\n" ++
         "Dispatch placeholders (for --dispatch args):\n" ++
         "  {message} / {text}, {chat_id}, {account}, {session}\n" ++
-        "Use --zolt to run messages through: zolt --session {session} --message {message} (zolt must be in PATH)\n" ++
+        "Use --zolt to run messages through: zolt --session {session} --message {message}.\n" ++
+        "Set --zolt-path explicitly or the `VOLT_ZOLT_PATH` env var to point at a specific binary.\n" ++
         "\n" ++
         "Examples:\n" ++
         "  volt init --mirror-openclaw --source /home/rtg/.openclaw\n" ++
@@ -449,10 +451,46 @@ fn runTelegramGateway(allocator: Allocator, opts: TelegramRunOptions) !void {
     defer allowed.deinit();
     const allow_list = allowed.value.allowFrom;
 
-    const dispatch = try parseDispatchPlan(allocator, if (opts.zolt) DefaultZoltDispatch else opts.dispatch);
+    const dispatch = if (opts.zolt) dispatch_block: {
+        const zolt_cmd = try resolveZoltCommand(allocator, opts.zolt_command);
+        defer allocator.free(zolt_cmd);
+
+        const zolt_dispatch = try std.fmt.allocPrint(
+            allocator,
+            "{s} --session {{session}} --message {{message}}",
+            .{zolt_cmd},
+        );
+        defer allocator.free(zolt_dispatch);
+
+        validateDispatchExecutable(allocator, zolt_cmd) catch |err| {
+            switch (err) {
+                error.DispatchBinaryNotFound => {
+                    try std.fs.File.stderr().writer().print(
+                        "volt: dispatch binary not found: {s}\n",
+                        .{zolt_cmd},
+                    );
+                },
+                error.DispatchBinaryNotExecutable => {
+                    try std.fs.File.stderr().writer().print(
+                        "volt: dispatch binary not executable: {s}\n",
+                        .{zolt_cmd},
+                    );
+                },
+                else => {
+                    try std.fs.File.stderr().writer().print(
+                        "volt: dispatch validation failed: {s}\n",
+                        .{@errorName(err)},
+                    );
+                },
+            }
+            return err;
+        };
+
+        break :dispatch_block try parseDispatchPlan(allocator, zolt_dispatch);
+    } else try parseDispatchPlan(allocator, opts.dispatch);
     defer deinitDispatchPlan(allocator, dispatch);
 
-    if (dispatch.mode == .argv and dispatch.argv.len > 0) {
+    if (!opts.zolt and dispatch.mode == .argv and dispatch.argv.len > 0) {
         validateDispatchExecutable(allocator, dispatch.argv[0]) catch |err| {
             switch (err) {
                 error.DispatchBinaryNotFound => {
@@ -571,6 +609,19 @@ fn parseInitOptions(args: []const []const u8) !InitOptions {
     return result;
 }
 
+fn resolveZoltCommand(allocator: Allocator, explicit: ?[]const u8) ![]u8 {
+    if (explicit) |command| {
+        return allocator.dupe(u8, command);
+    }
+
+    return std.process.getEnvVarOwned(allocator, "VOLT_ZOLT_PATH") catch |err| {
+        if (err == error.EnvironmentVariableNotFound) {
+            return allocator.dupe(u8, "zolt");
+        }
+        return err;
+    };
+}
+
 fn parseTelegramSetupOptions(allocator: Allocator, args: []const []const u8) !TelegramSetupOptions {
     var result = TelegramSetupOptions{
         .home_path = null,
@@ -628,6 +679,7 @@ fn parseTelegramRunOptions(args: []const []const u8) !TelegramRunOptions {
         .token = null,
         .dispatch = null,
         .zolt = false,
+        .zolt_command = null,
         .account = null,
         .poll_ms = 2500,
     };
@@ -669,6 +721,12 @@ fn parseTelegramRunOptions(args: []const []const u8) !TelegramRunOptions {
             result.zolt = true;
             continue;
         }
+        if (std.mem.eql(u8, arg, "--zolt-path")) {
+            if (idx + 1 >= args.len) return error.UnexpectedArgument;
+            result.zolt_command = args[idx + 1];
+            idx += 1;
+            continue;
+        }
         if (std.mem.eql(u8, arg, "--poll-ms")) {
             if (idx + 1 >= args.len) return error.UnexpectedArgument;
             result.poll_ms = try std.fmt.parseInt(u64, args[idx + 1], 10);
@@ -676,6 +734,10 @@ fn parseTelegramRunOptions(args: []const []const u8) !TelegramRunOptions {
             continue;
         }
         return error.UnknownArgument;
+    }
+
+    if (result.zolt_command != null and !result.zolt) {
+        return error.UnexpectedArgument;
     }
 
     return result;
@@ -1687,8 +1749,16 @@ test "parseTelegramRunOptions supports --zolt flag" {
     const opts = try parseTelegramRunOptions(&.{"--zolt"});
     try testing.expect(opts.zolt);
     try testing.expect(opts.dispatch == null);
+    try testing.expect(opts.zolt_command == null);
     try testing.expect(opts.poll_ms == 2500);
     try testing.expect(opts.account == null);
+}
+
+test "parseTelegramRunOptions supports --zolt-path" {
+    const opts = try parseTelegramRunOptions(&.{ "--zolt", "--zolt-path", "/usr/local/bin/zolt" });
+    try testing.expect(opts.zolt);
+    try testing.expect(opts.zolt_command != null);
+    try testing.expectEqualStrings("/usr/local/bin/zolt", opts.zolt_command.?);
 }
 
 test "parseTelegramRunOptions rejects --zolt combined with --dispatch" {
