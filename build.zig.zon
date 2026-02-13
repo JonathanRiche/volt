@@ -1,6 +1,12 @@
 .{
     .name = .volt,
     .version = "0.0.0",
+    .dependencies = .{
+        .zolt = .{
+            .url = "git+https://github.com/JonathanRiche/zolt#a0371fdfd9587ceacfd7dd67f45ebe813d3ef475",
+            .hash = "zig_ai-0.0.0-7oyHHFq5BAC4BMV1WcJzaFHZIFFDJa6SLzQcoAmumdbn",
+        },
+    },
     .fingerprint = 0xb2bb3dcf59feae96,
     .paths = .{
         "build.zig",

@@ -94,9 +94,10 @@ Running `volt` with no args starts local command passthrough mode (read a line f
 
 ## Build flags
 
-- `-Dwith-zolt` (default true): build and install zolt as part of `zig build install`.
+- `-Dwith-zolt` (default false): build and install zolt as part of `zig build install`.
 - `-Dzolt-source=<path>`: use a local zolt checkout (default `../zig-ai` if present).
-- If you keep a `zolt` checkout at `../zig-ai`, Volt auto-discovers it and vendors it.
+- `-Dzolt-dependency=<name>`: use dependency named in `build.zig.zon` (defaults to `zolt`).
+- If you keep a `zolt` checkout at `../zig-ai`, Volt auto-discovers it; otherwise it uses the dependency.
 
 ## Multi-account examples
 

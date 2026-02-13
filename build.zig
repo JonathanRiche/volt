@@ -44,7 +44,7 @@ fn maybeAddBundledZolt(
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
 ) void {
-    const with_zolt = b.option(bool, "with-zolt", "Bundle a local zolt binary with volt installs") orelse true;
+    const with_zolt = b.option(bool, "with-zolt", "Bundle a zolt binary with volt installs") orelse false;
     if (!with_zolt) return;
 
     const explicit_source = b.option(
@@ -52,16 +52,31 @@ fn maybeAddBundledZolt(
         "zolt-source",
         "Local zolt source path (defaults to ../zig-ai if it exists)",
     );
-    const source_path = resolveZoltSourcePath(explicit_source);
-    if (source_path == null) return;
+    if (resolveZoltSourcePath(explicit_source)) |source_path| {
+        return addZoltExecutableFromSourcePath(b, target, optimize, source_path);
+    }
 
+    const dep_name = b.option([]const u8, "zolt-dependency", "Name of build.zig.zon dependency to use for zolt") orelse "zolt";
+    const dep = resolveBundledZoltDependency(b, dep_name) orelse return;
+    const zolt = dep.artifact("zolt");
+    b.installArtifact(zolt);
+}
+
+fn addZoltExecutableFromSourcePath(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    source_path: []const u8,
+) void {
     const source_main = std.fmt.allocPrint(
         b.allocator,
         "{s}/src/main.zig",
-        .{source_path.?},
+        .{source_path},
     ) catch {
         return;
     };
+    defer b.allocator.free(source_main);
+
     const source_exists = pathExists(source_main);
     if (!source_exists) {
         return;
@@ -77,6 +92,11 @@ fn maybeAddBundledZolt(
         .root_module = zolt_module,
     });
     b.installArtifact(zolt);
+}
+
+fn resolveBundledZoltDependency(b: *std.Build, dep_name: []const u8) ?*std.Build.Dependency {
+    const dep = b.lazyDependency(dep_name, .{}) orelse return null;
+    return dep;
 }
 
 fn resolveZoltSourcePath(explicit_source: ?[]const u8) ?[]const u8 {
