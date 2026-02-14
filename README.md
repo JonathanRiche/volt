@@ -1,6 +1,6 @@
 # volt
 
-Volt is a lightweight Zig CLI that implements a subset of OpenClaw flows for local
+Volt is a lightweight Zig CLI for local
 std-IO execution and Telegram gateway setup/runtime.
 
 ## Quick build
@@ -15,8 +15,7 @@ Run the CLI:
 zig build run -- --help
 ```
 
-By default, Volt uses `~/.volt` as the workspace root (or `--home`) and still accepts
-legacy `OPENCLAW_*` and `CLAWDBOT_*` aliases.
+By default, Volt uses `~/.volt` as the workspace root (or `--home`).
 
 Volt can bundle a local `zolt` checkout so `--zolt` can run without a preinstalled system `zolt` binary. When bundling is enabled, Volt prefers:
 

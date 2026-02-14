@@ -4,7 +4,7 @@ const testing = std.testing;
 
 const Allocator = std.mem.Allocator;
 
-const OpenClawSeedConfig = struct {
+const VoltSeedConfig = struct {
     meta: struct {
         lastTouchedVersion: []const u8,
         lastTouchedAt: []const u8,
@@ -46,7 +46,7 @@ const OpenClawSeedConfig = struct {
     },
 };
 
-const DEFAULT_OPENCLAW_SEED = OpenClawSeedConfig{
+const DEFAULT_VOLT_SEED = VoltSeedConfig{
     .meta = .{
         .lastTouchedVersion = "2026.1.30",
         .lastTouchedAt = "1970-01-01T00:00:00.000Z",
@@ -88,7 +88,7 @@ const DEFAULT_OPENCLAW_SEED = OpenClawSeedConfig{
     },
 };
 
-const OpenClawConfig = struct {
+const VoltConfig = struct {
     channels: struct {
         telegram: struct {
             botToken: []const u8 = "",
@@ -97,7 +97,7 @@ const OpenClawConfig = struct {
 };
 
 const InitOptions = struct {
-    mirror_openclaw: bool,
+    mirror_volt: bool,
     force: bool,
     home_path: ?[]const u8,
     source_path: ?[]const u8,
@@ -185,7 +185,7 @@ fn printUsage() !void {
 
     try out.writeAll("volt: lightweight cli for local stdio + telegram gateway\n" ++
         "Usage:\n" ++
-        "  volt init [--mirror-openclaw] [--source <path>] [--home <path>] [--force]\n" ++
+        "  volt init [--mirror-volt] [--source <path>] [--home <path>] [--force]\n" ++
         "  volt telegram setup --token <token> [--account <id>] [--allow-from <chat_id>]... [--home <path>] [--force]\n" ++
         "  volt --telegram [--token <token>] [--account <id>] [--home <path>] [--dispatch <command>] [--zolt] [--zolt-path <path>] [--poll-ms <ms>]\n" ++
         "\n" ++
@@ -314,12 +314,12 @@ fn runInit(allocator: Allocator, opts: InitOptions) !void {
     const workspace_path = try std.process.getCwdAlloc(allocator);
     defer allocator.free(workspace_path);
 
-    const openclaw = try renderOpenClawConfig(allocator, "", workspace_path, template_text, null);
-    defer allocator.free(openclaw);
+    const volt = try renderVoltConfig(allocator, "", workspace_path, template_text, null);
+    defer allocator.free(volt);
 
-    const openclaw_path = try joinPath(allocator, target_root, "openclaw.json");
-    defer allocator.free(openclaw_path);
-    try writeTextFile(openclaw_path, openclaw, opts.force);
+    const volt_path = try joinPath(allocator, target_root, "volt.json");
+    defer allocator.free(volt_path);
+    try writeTextFile(volt_path, volt, opts.force);
 
     const allow_list_path = try joinPath(allocator, target_root, "credentials/telegram-allowFrom.json");
     defer allocator.free(allow_list_path);
@@ -337,7 +337,7 @@ fn runInit(allocator: Allocator, opts: InitOptions) !void {
     defer allocator.free(update_check_path);
     try writeTextFile(update_check_path, DefaultUpdateCheckJson, opts.force);
 
-    if (!opts.mirror_openclaw) return;
+    if (!opts.mirror_volt) return;
 
     const mirror_files = [_][]const u8{
         "clawdbot.json",
@@ -368,7 +368,7 @@ fn runInit(allocator: Allocator, opts: InitOptions) !void {
         copied_any = true;
     }
 
-    if (!copied_any) return error.NoOpenClawSourceFiles;
+    if (!copied_any) return error.NoTemplateSourceFiles;
 }
 
 fn runTelegramSetup(allocator: Allocator, opts: TelegramSetupOptions) !void {
@@ -390,12 +390,12 @@ fn runTelegramSetup(allocator: Allocator, opts: TelegramSetupOptions) !void {
     const workspace = try std.process.getCwdAlloc(allocator);
     defer allocator.free(workspace);
 
-    const openclaw = try renderOpenClawConfig(allocator, token, workspace, template_text, account);
-    defer allocator.free(openclaw);
+    const volt = try renderVoltConfig(allocator, token, workspace, template_text, account);
+    defer allocator.free(volt);
 
-    const openclaw_path = try joinPath(allocator, root, "openclaw.json");
-    defer allocator.free(openclaw_path);
-    try writeTextFile(openclaw_path, openclaw, true);
+    const volt_path = try joinPath(allocator, root, "volt.json");
+    defer allocator.free(volt_path);
+    try writeTextFile(volt_path, volt, true);
 
     const credentials_path = try joinPath(allocator, root, "credentials");
     defer allocator.free(credentials_path);
@@ -576,7 +576,7 @@ fn runTelegramGateway(allocator: Allocator, opts: TelegramRunOptions) !void {
 
 fn parseInitOptions(args: []const []const u8) !InitOptions {
     var result = InitOptions{
-        .mirror_openclaw = false,
+        .mirror_volt = false,
         .force = false,
         .home_path = null,
         .source_path = null,
@@ -585,8 +585,8 @@ fn parseInitOptions(args: []const []const u8) !InitOptions {
     var idx: usize = 0;
     while (idx < args.len) : (idx += 1) {
         const arg = args[idx];
-        if (std.mem.eql(u8, arg, "--mirror-openclaw")) {
-            result.mirror_openclaw = true;
+        if (std.mem.eql(u8, arg, "--mirror-volt")) {
+            result.mirror_volt = true;
             continue;
         }
         if (std.mem.eql(u8, arg, "--force")) {
@@ -776,7 +776,7 @@ fn resolveHomePath(allocator: Allocator, override: ?[]const u8) ![]u8 {
 
 fn resolveConfigRoot(allocator: Allocator, override: ?[]const u8) ![]u8 {
     if (override) |value| {
-        const base = try resolveOpenClawHome(allocator);
+        const base = try resolveVoltHome(allocator);
         defer allocator.free(base);
         return try resolveExpandedPath(allocator, value, base);
     }
@@ -784,67 +784,36 @@ fn resolveConfigRoot(allocator: Allocator, override: ?[]const u8) ![]u8 {
     const volt_state_dir = std.process.getEnvVarOwned(allocator, "VOLT_STATE_DIR") catch |err| {
         return switch (err) {
             error.EnvironmentVariableNotFound => {
-                const openclaw_state_dir = std.process.getEnvVarOwned(allocator, "OPENCLAW_STATE_DIR") catch |openclaw_err| {
-                    return switch (openclaw_err) {
-                        error.EnvironmentVariableNotFound => {
-                            const clawbot_state_dir = std.process.getEnvVarOwned(allocator, "CLAWDBOT_STATE_DIR") catch |legacy_err| {
-                                return switch (legacy_err) {
-                                    error.EnvironmentVariableNotFound => {
-                                        const home = try resolveOpenClawHome(allocator);
-                                        defer allocator.free(home);
-                                        return try joinPath(allocator, home, ".volt");
-                                    },
-                                    else => return legacy_err,
-                                };
-                            };
-                            defer allocator.free(clawbot_state_dir);
-                            const home = try resolveOpenClawHome(allocator);
-                            defer allocator.free(home);
-                            return try resolveExpandedPath(allocator, clawbot_state_dir, home);
-                        },
-                        else => return openclaw_err,
-                    };
-                };
-                defer allocator.free(openclaw_state_dir);
-                const home = try resolveOpenClawHome(allocator);
+                const home = try resolveVoltHome(allocator);
                 defer allocator.free(home);
-                return try resolveExpandedPath(allocator, openclaw_state_dir, home);
+                return try joinPath(allocator, home, ".volt");
             },
             else => return err,
         };
     };
     defer allocator.free(volt_state_dir);
 
-    const home = try resolveOpenClawHome(allocator);
+    const home = try resolveVoltHome(allocator);
     defer allocator.free(home);
     return try resolveExpandedPath(allocator, volt_state_dir, home);
 }
 
-fn resolveOpenClawHome(allocator: Allocator) ![]u8 {
+fn resolveVoltHome(allocator: Allocator) ![]u8 {
     const volt_home = std.process.getEnvVarOwned(allocator, "VOLT_HOME") catch |err| {
         return switch (err) {
             error.EnvironmentVariableNotFound => {
-                const openclaw_home = std.process.getEnvVarOwned(allocator, "OPENCLAW_HOME") catch |openclaw_err| {
-                    return switch (openclaw_err) {
+                const home = std.process.getEnvVarOwned(allocator, "HOME") catch |home_err| {
+                    return switch (home_err) {
                         error.EnvironmentVariableNotFound => {
-                            const home = std.process.getEnvVarOwned(allocator, "HOME") catch |home_err| {
-                                return switch (home_err) {
-                                    error.EnvironmentVariableNotFound => {
-                                        const cwd = try std.process.getCwdAlloc(allocator);
-                                        defer allocator.free(cwd);
-                                        return try allocator.dupe(u8, cwd);
-                                    },
-                                    else => return home_err,
-                                };
-                            };
-                            defer allocator.free(home);
-                            return try allocator.dupe(u8, home);
+                            const cwd = try std.process.getCwdAlloc(allocator);
+                            defer allocator.free(cwd);
+                            return try allocator.dupe(u8, cwd);
                         },
-                        else => return openclaw_err,
+                        else => return home_err,
                     };
                 };
-                defer allocator.free(openclaw_home);
-                const trimmed = std.mem.trim(u8, openclaw_home, " \t\r\n");
+                defer allocator.free(home);
+                const trimmed = std.mem.trim(u8, home, " \t\r\n");
                 if (trimmed.len == 0) {
                     const cwd = try std.process.getCwdAlloc(allocator);
                     defer allocator.free(cwd);
@@ -920,34 +889,16 @@ fn resolveConfigPath(allocator: Allocator, home_root: []const u8) ![]u8 {
     const config_path = std.process.getEnvVarOwned(allocator, "VOLT_CONFIG_PATH") catch |err| {
         switch (err) {
             error.EnvironmentVariableNotFound => {
-                const openclaw_config_path = std.process.getEnvVarOwned(allocator, "OPENCLAW_CONFIG_PATH") catch |openclaw_err| {
-                    return switch (openclaw_err) {
-                        error.EnvironmentVariableNotFound => {
-                            const clawbot_config_path = std.process.getEnvVarOwned(allocator, "CLAWDBOT_CONFIG_PATH") catch |legacy_err| {
-                                return switch (legacy_err) {
-                                    error.EnvironmentVariableNotFound => joinPath(allocator, home_root, "openclaw.json"),
-                                    else => return legacy_err,
-                                };
-                            };
-                            defer allocator.free(clawbot_config_path);
-                            const home = try resolveOpenClawHome(allocator);
-                            defer allocator.free(home);
-                            return try resolveExpandedPath(allocator, clawbot_config_path, home);
-                        },
-                        else => return openclaw_err,
-                    };
-                };
-                defer allocator.free(openclaw_config_path);
-                const home = try resolveOpenClawHome(allocator);
+                const home = try resolveVoltHome(allocator);
                 defer allocator.free(home);
-                return try resolveExpandedPath(allocator, openclaw_config_path, home);
+                return try joinPath(allocator, home_root, "volt.json");
             },
             else => return err,
         }
     };
     defer allocator.free(config_path);
 
-    const home = try resolveOpenClawHome(allocator);
+    const home = try resolveVoltHome(allocator);
     defer allocator.free(home);
     return try resolveExpandedPath(allocator, config_path, home);
 }
@@ -1000,13 +951,13 @@ fn readFileAlloc(allocator: Allocator, path: []const u8) ![]u8 {
 }
 
 fn loadTemplateText(allocator: Allocator, source_root: []const u8) !?[]u8 {
-    const template_path = try joinPath(allocator, source_root, "openclaw.json");
+    const template_path = try joinPath(allocator, source_root, "volt.json");
     defer allocator.free(template_path);
 
     return try readFileAlloc(allocator, template_path);
 }
 
-fn renderOpenClawConfig(
+fn renderVoltConfig(
     allocator: Allocator,
     token: []const u8,
     workspace: []const u8,
@@ -1015,12 +966,12 @@ fn renderOpenClawConfig(
 ) ![]u8 {
     if (template_text) |template| {
         const parsed = std.json.parseFromSlice(std.json.Value, allocator, template, .{}) catch {
-            return try renderOpenClawSeedConfig(allocator, token, workspace, account_id);
+            return try renderVoltSeedConfig(allocator, token, workspace, account_id);
         };
         defer parsed.deinit();
 
         var root = parsed.value;
-        try patchOpenClawValue(allocator, &root, token, workspace, account_id);
+        try patchVoltValue(allocator, &root, token, workspace, account_id);
 
         var out = std.Io.Writer.Allocating.init(allocator);
         defer out.deinit();
@@ -1030,17 +981,17 @@ fn renderOpenClawConfig(
         return out.toOwnedSlice();
     }
 
-    return try renderOpenClawSeedConfig(allocator, token, workspace, account_id);
+    return try renderVoltSeedConfig(allocator, token, workspace, account_id);
 }
 
-fn renderOpenClawSeedConfig(
+fn renderVoltSeedConfig(
     allocator: Allocator,
     token: []const u8,
     workspace: []const u8,
     account_id: ?[]const u8,
 ) ![]u8 {
     const account = account_id orelse DefaultAccountId;
-    var seed = DEFAULT_OPENCLAW_SEED;
+    var seed = DEFAULT_VOLT_SEED;
     if (std.mem.eql(u8, account, DefaultAccountId)) {
         seed.channels.telegram.botToken = token;
     }
@@ -1063,7 +1014,7 @@ fn renderOpenClawSeedConfig(
     defer parsed.deinit();
 
     var root = parsed.value;
-    try patchOpenClawValue(allocator, &root, token, workspace, account_id);
+    try patchVoltValue(allocator, &root, token, workspace, account_id);
 
     var rewritten = std.Io.Writer.Allocating.init(allocator);
     defer rewritten.deinit();
@@ -1073,7 +1024,7 @@ fn renderOpenClawSeedConfig(
     return rewritten.toOwnedSlice();
 }
 
-fn patchOpenClawValue(
+fn patchVoltValue(
     allocator: Allocator,
     root: *std.json.Value,
     token: []const u8,
@@ -1747,7 +1698,7 @@ fn trimLine(value: []const u8) []const u8 {
     return std.mem.trim(u8, value, "\r\n");
 }
 
-test "normalizeAccountId matches openclaw constraints" {
+test "normalizeAccountId matches volt constraints" {
     const allocator = testing.allocator;
 
     const normalized = try normalizeAccountId(allocator, " Work Account ");
@@ -1762,7 +1713,7 @@ test "normalizeAccountId matches openclaw constraints" {
 test "resolveTelegramTokenFromConfig supports tokenFile, botToken, and normalized account keys" {
     const allocator = testing.allocator;
 
-    const token_file = "/tmp/volt-openclaw-token-test.txt";
+    const token_file = "/tmp/volt-token-test.txt";
     const token_file_handle = try std.fs.createFileAbsolute(token_file, .{ .truncate = true });
     defer {
         token_file_handle.close();
@@ -1770,7 +1721,7 @@ test "resolveTelegramTokenFromConfig supports tokenFile, botToken, and normalize
     }
     try token_file_handle.writeAll("from-file\n");
 
-    const account_token_file = "/tmp/volt-openclaw-account-token-test.txt";
+    const account_token_file = "/tmp/volt-account-token-test.txt";
     const account_token_file_handle = try std.fs.createFileAbsolute(account_token_file, .{ .truncate = true });
     defer {
         account_token_file_handle.close();

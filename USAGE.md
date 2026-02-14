@@ -4,15 +4,15 @@
 
 ### `volt init`
 
-Create the OpenClaw-compatible workspace under `~/.volt` by default (or `--home`).
+Create the Volt workspace under `~/.volt` by default (or `--home`).
 
 ```bash
-volt init [--mirror-openclaw] [--source <path>] [--home <path>] [--force]
+volt init [--mirror-volt] [--source <path>] [--home <path>] [--force]
 ```
 
 - `--home <path>`: override state directory.
-- `--source <path>`: seed from an existing OpenClaw checkout.
-- `--mirror-openclaw`: copy extra files if present in source.
+- `--source <path>`: seed from an existing Volt checkout.
+- `--mirror-volt`: copy extra files if present in source.
 - `--force`: overwrite existing files.
 
 ### `volt telegram setup`
@@ -87,9 +87,9 @@ Running `volt` with no args starts local command passthrough mode (read a line f
 
 ## Env aliases
 
-- `VOLT_HOME` / `OPENCLAW_HOME`
-- `VOLT_STATE_DIR` / `OPENCLAW_STATE_DIR` / `CLAWDBOT_STATE_DIR`
-- `VOLT_CONFIG_PATH` / `OPENCLAW_CONFIG_PATH` / `CLAWDBOT_CONFIG_PATH`
+- `VOLT_HOME`
+- `VOLT_STATE_DIR`
+- `VOLT_CONFIG_PATH`
 - `TELEGRAM_BOT_TOKEN`
 - `VOLT_ZOLT_PATH`
 
