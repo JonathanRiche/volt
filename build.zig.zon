@@ -3,8 +3,8 @@
     .version = "0.0.0",
     .dependencies = .{
         .zolt = .{
-            .url = "git+https://github.com/JonathanRiche/zolt#a0371fdfd9587ceacfd7dd67f45ebe813d3ef475",
-            .hash = "zig_ai-0.0.0-7oyHHFq5BAC4BMV1WcJzaFHZIFFDJa6SLzQcoAmumdbn",
+            .url = "git+https://github.com/JonathanRiche/zolt#68dfe9195ac3d73a5734a55e56e1c6b94ee06c51",
+            .hash = "zig_ai-0.0.0-7oyHHN0CBgAHY295TQ2w9jjW8I3cOXlQ0nKZgkMg37Mu",
         },
     },
     .fingerprint = 0xb2bb3dcf59feae96,
