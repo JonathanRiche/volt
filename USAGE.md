@@ -4,7 +4,7 @@
 
 ### `volt init`
 
-Create the OpenClaw-compatible workspace under `~/.openclaw` (or `--home`).
+Create the OpenClaw-compatible workspace under `~/.volt` by default (or `--home`).
 
 ```bash
 volt init [--mirror-openclaw] [--source <path>] [--home <path>] [--force]
@@ -87,8 +87,9 @@ Running `volt` with no args starts local command passthrough mode (read a line f
 
 ## Env aliases
 
-- `OPENCLAW_STATE_DIR` / `CLAWDBOT_STATE_DIR`
-- `OPENCLAW_CONFIG_PATH` / `CLAWDBOT_CONFIG_PATH`
+- `VOLT_HOME` / `OPENCLAW_HOME`
+- `VOLT_STATE_DIR` / `OPENCLAW_STATE_DIR` / `CLAWDBOT_STATE_DIR`
+- `VOLT_CONFIG_PATH` / `OPENCLAW_CONFIG_PATH` / `CLAWDBOT_CONFIG_PATH`
 - `TELEGRAM_BOT_TOKEN`
 - `VOLT_ZOLT_PATH`
 
@@ -106,7 +107,7 @@ Use `--account` to configure and run separate Telegram bots/accounts against one
 ### Setup default account
 
 ```bash
-volt telegram setup --home ~/.openclaw --token "<default_bot_token>"
+volt telegram setup --home ~/.volt --token "<default_bot_token>"
 ```
 
 This writes:
@@ -116,7 +117,7 @@ This writes:
 ### Setup a named account
 
 ```bash
-volt telegram setup --home ~/.openclaw --account work --token "<work_bot_token>"
+volt telegram setup --home ~/.volt --account work --token "<work_bot_token>"
 ```
 
 This writes:
@@ -126,19 +127,19 @@ This writes:
 ### Run default account in gateway mode
 
 ```bash
-volt --telegram --home ~/.openclaw
+volt --telegram --home ~/.volt
 ```
 
 ### Run a named account in gateway mode
 
 ```bash
-volt --telegram --home ~/.openclaw --account work
+volt --telegram --home ~/.volt --account work
 ```
 
 ### Use account-specific allow list while keeping separate default allow list
 
 ```bash
-volt telegram setup --home ~/.openclaw --account work --token "<work_bot_token>" --allow-from 111111111 --allow-from 222222222
+volt telegram setup --home ~/.volt --account work --token "<work_bot_token>" --allow-from 111111111 --allow-from 222222222
 ```
 
 This stores the allowlist in the shared `credentials/telegram-allowFrom.json` used by gateway runtime.

@@ -196,7 +196,7 @@ fn printUsage() !void {
         "Set --zolt-path explicitly or the `VOLT_ZOLT_PATH` env var to point at a specific binary.\n" ++
         "\n" ++
         "Examples:\n" ++
-        "  volt init --mirror-openclaw --source /home/rtg/.openclaw\n" ++
+        "  volt init --home ~/.volt\n" ++
         "  volt telegram setup --token 123:ABC --account work --allow-from 8257801789\n" ++
         "  volt --telegram --dispatch \"zolt --session {session} --message {message}\"\n");
 }
@@ -781,56 +781,82 @@ fn resolveConfigRoot(allocator: Allocator, override: ?[]const u8) ![]u8 {
         return try resolveExpandedPath(allocator, value, base);
     }
 
-    const openclaw_state_dir = std.process.getEnvVarOwned(allocator, "OPENCLAW_STATE_DIR") catch |err| {
+    const volt_state_dir = std.process.getEnvVarOwned(allocator, "VOLT_STATE_DIR") catch |err| {
         return switch (err) {
             error.EnvironmentVariableNotFound => {
-                const legacy_openclaw_state_dir = std.process.getEnvVarOwned(allocator, "CLAWDBOT_STATE_DIR") catch |legacy_err| {
-                    return switch (legacy_err) {
+                const openclaw_state_dir = std.process.getEnvVarOwned(allocator, "OPENCLAW_STATE_DIR") catch |openclaw_err| {
+                    return switch (openclaw_err) {
                         error.EnvironmentVariableNotFound => {
+                            const clawbot_state_dir = std.process.getEnvVarOwned(allocator, "CLAWDBOT_STATE_DIR") catch |legacy_err| {
+                                return switch (legacy_err) {
+                                    error.EnvironmentVariableNotFound => {
+                                        const home = try resolveOpenClawHome(allocator);
+                                        defer allocator.free(home);
+                                        return try joinPath(allocator, home, ".volt");
+                                    },
+                                    else => return legacy_err,
+                                };
+                            };
+                            defer allocator.free(clawbot_state_dir);
                             const home = try resolveOpenClawHome(allocator);
                             defer allocator.free(home);
-                            return try joinPath(allocator, home, ".openclaw");
+                            return try resolveExpandedPath(allocator, clawbot_state_dir, home);
                         },
-                        else => return legacy_err,
+                        else => return openclaw_err,
                     };
                 };
-                defer allocator.free(legacy_openclaw_state_dir);
+                defer allocator.free(openclaw_state_dir);
                 const home = try resolveOpenClawHome(allocator);
                 defer allocator.free(home);
-                return try resolveExpandedPath(allocator, legacy_openclaw_state_dir, home);
+                return try resolveExpandedPath(allocator, openclaw_state_dir, home);
             },
             else => return err,
         };
     };
-    defer allocator.free(openclaw_state_dir);
+    defer allocator.free(volt_state_dir);
 
     const home = try resolveOpenClawHome(allocator);
     defer allocator.free(home);
-    return try resolveExpandedPath(allocator, openclaw_state_dir, home);
+    return try resolveExpandedPath(allocator, volt_state_dir, home);
 }
 
 fn resolveOpenClawHome(allocator: Allocator) ![]u8 {
-    const openclaw_home = std.process.getEnvVarOwned(allocator, "OPENCLAW_HOME") catch |err| {
+    const volt_home = std.process.getEnvVarOwned(allocator, "VOLT_HOME") catch |err| {
         return switch (err) {
             error.EnvironmentVariableNotFound => {
-                const home = std.process.getEnvVarOwned(allocator, "HOME") catch |home_err| {
-                    return switch (home_err) {
+                const openclaw_home = std.process.getEnvVarOwned(allocator, "OPENCLAW_HOME") catch |openclaw_err| {
+                    return switch (openclaw_err) {
                         error.EnvironmentVariableNotFound => {
-                            const cwd = try std.process.getCwdAlloc(allocator);
-                            defer allocator.free(cwd);
-                            return try allocator.dupe(u8, cwd);
+                            const home = std.process.getEnvVarOwned(allocator, "HOME") catch |home_err| {
+                                return switch (home_err) {
+                                    error.EnvironmentVariableNotFound => {
+                                        const cwd = try std.process.getCwdAlloc(allocator);
+                                        defer allocator.free(cwd);
+                                        return try allocator.dupe(u8, cwd);
+                                    },
+                                    else => return home_err,
+                                };
+                            };
+                            defer allocator.free(home);
+                            return try allocator.dupe(u8, home);
                         },
-                        else => return home_err,
+                        else => return openclaw_err,
                     };
                 };
-                defer allocator.free(home);
-                return try allocator.dupe(u8, home);
+                defer allocator.free(openclaw_home);
+                const trimmed = std.mem.trim(u8, openclaw_home, " \t\r\n");
+                if (trimmed.len == 0) {
+                    const cwd = try std.process.getCwdAlloc(allocator);
+                    defer allocator.free(cwd);
+                    return try allocator.dupe(u8, cwd);
+                }
+                return try allocator.dupe(u8, trimmed);
             },
             else => return err,
         };
     };
-    defer allocator.free(openclaw_home);
-    const trimmed = std.mem.trim(u8, openclaw_home, " \t\r\n");
+    defer allocator.free(volt_home);
+    const trimmed = std.mem.trim(u8, volt_home, " \t\r\n");
     if (trimmed.len == 0) {
         const cwd = try std.process.getCwdAlloc(allocator);
         defer allocator.free(cwd);
@@ -838,7 +864,7 @@ fn resolveOpenClawHome(allocator: Allocator) ![]u8 {
     }
     const host_home = try resolveHostHome(allocator);
     defer allocator.free(host_home);
-    return try resolveExpandedPath(allocator, openclaw_home, host_home);
+    return try resolveExpandedPath(allocator, volt_home, host_home);
 }
 
 fn resolveHostHome(allocator: Allocator) ![]u8 {
@@ -891,19 +917,30 @@ fn resolveExpandedPath(allocator: Allocator, value: []const u8, fallback_home: [
 }
 
 fn resolveConfigPath(allocator: Allocator, home_root: []const u8) ![]u8 {
-    const config_path = std.process.getEnvVarOwned(allocator, "OPENCLAW_CONFIG_PATH") catch |err| {
+    const config_path = std.process.getEnvVarOwned(allocator, "VOLT_CONFIG_PATH") catch |err| {
         switch (err) {
             error.EnvironmentVariableNotFound => {
-                const legacy_config_path = std.process.getEnvVarOwned(allocator, "CLAWDBOT_CONFIG_PATH") catch |legacy_err| {
-                    return switch (legacy_err) {
-                        error.EnvironmentVariableNotFound => joinPath(allocator, home_root, "openclaw.json"),
-                        else => return legacy_err,
+                const openclaw_config_path = std.process.getEnvVarOwned(allocator, "OPENCLAW_CONFIG_PATH") catch |openclaw_err| {
+                    return switch (openclaw_err) {
+                        error.EnvironmentVariableNotFound => {
+                            const clawbot_config_path = std.process.getEnvVarOwned(allocator, "CLAWDBOT_CONFIG_PATH") catch |legacy_err| {
+                                return switch (legacy_err) {
+                                    error.EnvironmentVariableNotFound => joinPath(allocator, home_root, "openclaw.json"),
+                                    else => return legacy_err,
+                                };
+                            };
+                            defer allocator.free(clawbot_config_path);
+                            const home = try resolveOpenClawHome(allocator);
+                            defer allocator.free(home);
+                            return try resolveExpandedPath(allocator, clawbot_config_path, home);
+                        },
+                        else => return openclaw_err,
                     };
                 };
-                defer allocator.free(legacy_config_path);
+                defer allocator.free(openclaw_config_path);
                 const home = try resolveOpenClawHome(allocator);
                 defer allocator.free(home);
-                return try resolveExpandedPath(allocator, legacy_config_path, home);
+                return try resolveExpandedPath(allocator, openclaw_config_path, home);
             },
             else => return err,
         }

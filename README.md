@@ -15,6 +15,9 @@ Run the CLI:
 zig build run -- --help
 ```
 
+By default, Volt uses `~/.volt` as the workspace root (or `--home`) and still accepts
+legacy `OPENCLAW_*` and `CLAWDBOT_*` aliases.
+
 Volt can bundle a local `zolt` checkout so `--zolt` can run without a preinstalled system `zolt` binary. When bundling is enabled, Volt prefers:
 
 1. local source via `-Dzolt-source=...` (or `../zig-ai` if present),
