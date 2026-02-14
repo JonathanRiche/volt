@@ -19,7 +19,7 @@ By default, Volt uses `~/.volt` as the workspace root (or `--home`).
 
 Volt can bundle a local `zolt` checkout so `--zolt` can run without a preinstalled system `zolt` binary. When bundling is enabled, Volt prefers:
 
-1. local source via `-Dzolt-source=...` (or `../zig-ai` if present),
+1. local source via `-Dzolt-source=...` (or `../zolt` if present),
 2. dependency named `zolt` declared in `build.zig.zon` (default points to `github.com/JonathanRiche/zolt`).
 
 Options:

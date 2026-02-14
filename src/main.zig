@@ -172,7 +172,7 @@ const DefaultPairingJson = "{\"version\":1,\"requests\":[]}";
 const DefaultUpdateCheckJson = "{\"lastCheckedAt\":\"1970-01-01T00:00:00.000Z\"}";
 const DefaultGatewayToken = "volt-gateway-token";
 const DefaultAccountId = "default";
-const DefaultCommandCheckArgv = [_][]const u8{"--help"};
+const DefaultCommandCheckArgv = [_][]const u8{ "--help", "-h" };
 
 fn isHelp(arg: []const u8) bool {
     return std.mem.eql(u8, arg, "--help") or
@@ -191,14 +191,15 @@ fn printUsage() !void {
         "\n" ++
         "Dispatch placeholders (for --dispatch args):\n" ++
         "  {message} / {text}, {chat_id}, {account}, {session}\n" ++
-        "Use --zolt to run messages through: zolt --session {session} --message {message}.\n" ++
+        "Use --zolt to run messages through: zolt --session {session}.\n" ++
+        "Run zolt -h (or --help) for current supported flags.\n" ++
         "Resolution order for --zolt is: --zolt-path/VOLT_ZOLT_PATH, bundled volt/zolt, then system PATH.\n" ++
         "Set --zolt-path explicitly or the `VOLT_ZOLT_PATH` env var to point at a specific binary.\n" ++
         "\n" ++
         "Examples:\n" ++
         "  volt init --home ~/.volt\n" ++
         "  volt telegram setup --token 123:ABC --account work --allow-from 8257801789\n" ++
-        "  volt --telegram --dispatch \"zolt --session {session} --message {message}\"\n");
+        "  volt --telegram --dispatch \"zolt -s {session} {message}\"\n");
 }
 
 pub fn main() !void {
@@ -1216,17 +1217,26 @@ const DispatchValidationError = error{
 };
 
 fn validateDispatchExecutable(allocator: Allocator, command: []const u8) DispatchValidationError!void {
-    const probe_argv = [_][]const u8{ command, DefaultCommandCheckArgv[0] };
-    const result = std.process.Child.run(.{
-        .allocator = allocator,
-        .argv = &probe_argv,
-    }) catch |err| {
-        return mapDispatchValidationError(err);
-    };
-    defer {
-        allocator.free(result.stdout);
-        allocator.free(result.stderr);
+    var last_error: ?DispatchValidationError = null;
+
+    for (DefaultCommandCheckArgv) |help_arg| {
+        const probe_argv = [_][]const u8{ command, help_arg };
+        const result = std.process.Child.run(.{
+            .allocator = allocator,
+            .argv = &probe_argv,
+        }) catch |err| {
+            last_error = mapDispatchValidationError(err);
+            continue;
+        };
+
+        defer {
+            allocator.free(result.stdout);
+            allocator.free(result.stderr);
+        }
+        return;
     }
+
+    return last_error orelse DispatchValidationError.DispatchBinaryCheckFailed;
 }
 
 fn mapDispatchValidationError(err: anyerror) DispatchValidationError {

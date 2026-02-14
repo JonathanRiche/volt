@@ -41,7 +41,9 @@ volt --telegram [--token <token>] [--account <id>] [--home <path>] [--dispatch <
 
 `--zolt` enables a preset dispatch mapping to:
 
-`zolt --session {session} --message {message}`
+`zolt --session {session}` plus your configured message handling.
+
+Run `zolt -h` to check supported flags (for example `-s` / `--session`).
 
 `--zolt-path <path>` sets the exact executable used for zolt mode, overriding `zolt` in PATH.
 You can also set `VOLT_ZOLT_PATH`.
@@ -72,7 +74,7 @@ If `--token` is omitted, token resolution is:
 Example:
 
 ```bash
-volt --telegram --dispatch "zolt --session {session} --message {message}"
+volt --telegram --dispatch "zolt -s {session} {message}"
 ```
 
 or equivalent:
@@ -96,9 +98,9 @@ Running `volt` with no args starts local command passthrough mode (read a line f
 ## Build flags
 
 - `-Dwith-zolt` (default false): build and install zolt as part of `zig build install`.
-- `-Dzolt-source=<path>`: use a local zolt checkout (default `../zig-ai` if present).
+- `-Dzolt-source=<path>`: use a local zolt checkout (default `../zolt` if present).
 - `-Dzolt-dependency=<name>`: use dependency named in `build.zig.zon` (defaults to `zolt`).
-- If you keep a `zolt` checkout at `../zig-ai`, Volt auto-discovers it; otherwise it uses the dependency.
+- If you keep a `zolt` checkout at `../zolt`, Volt auto-discovers it; otherwise it uses the dependency.
 
 ## Multi-account examples
 

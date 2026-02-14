@@ -50,7 +50,7 @@ fn maybeAddBundledZolt(
     const explicit_source = b.option(
         []const u8,
         "zolt-source",
-        "Local zolt source path (defaults to ../zig-ai if it exists)",
+        "Local zolt source path (defaults to ../zolt if it exists)",
     );
     if (resolveZoltSourcePath(explicit_source)) |source_path| {
         return addZoltExecutableFromSourcePath(b, target, optimize, source_path);
@@ -113,8 +113,8 @@ fn resolveZoltSourcePath(explicit_source: ?[]const u8) ?[]const u8 {
         }
         return null;
     }
-    if (pathExists("../zig-ai/src/main.zig")) {
-        return "../zig-ai";
+    if (pathExists("../zolt/src/main.zig")) {
+        return "../zolt";
     }
     return null;
 }
