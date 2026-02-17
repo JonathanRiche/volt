@@ -147,7 +147,7 @@ const GatewayRoute = enum { health, status, invoke, unknown };
 const GatewayError = error{ GatewayAuthMissing, GatewayBadRequest };
 const GatewayServiceError = error{ GatewayServiceUnsupportedPlatform, GatewayServiceCommandFailed };
 
-const DefaultZoltDispatch = "zolt --session {session} --message {message}";
+const DefaultZoltDispatch = "zolt run --session {session} {message}";
 
 const DispatchMode = enum { shell, argv };
 
@@ -224,8 +224,8 @@ fn printUsage() !void {
         "\n" ++
         "Dispatch placeholders (for --dispatch args):\n" ++
         "  {message} / {text}, {chat_id}, {account}, {session}\n" ++
-        "Use --zolt to run messages through: zolt --session {session}.\n" ++
-        "Run zolt -h (or --help) for current supported flags.\n" ++
+        "Use --zolt to run messages through: zolt run --session {session} {message}.\n" ++
+        "Run `zolt run -h` (or `zolt run --help`) for current supported flags.\n" ++
         "Resolution order for --zolt is: --zolt-path/VOLT_ZOLT_PATH, bundled volt/zolt, then system PATH.\n" ++
         "Set --zolt-path explicitly or the `VOLT_ZOLT_PATH` env var to point at a specific binary.\n" ++
         "\n" ++
@@ -341,7 +341,7 @@ fn runGateway(allocator: Allocator, opts: GatewayRunOptions) !void {
 
         const zolt_dispatch = try std.fmt.allocPrint(
             allocator,
-            "{s} --session {s} --message {s}",
+            "{s} run --session {s} {s}",
             .{ zolt_cmd, "{session}", "{message}" },
         );
         defer allocator.free(zolt_dispatch);
@@ -861,7 +861,7 @@ fn runTelegramGateway(allocator: Allocator, opts: TelegramRunOptions) !void {
 
         const zolt_dispatch = try std.fmt.allocPrint(
             allocator,
-            "{s} --session {{session}} --message {{message}}",
+            "{s} run --session {{session}} {{message}}",
             .{zolt_cmd},
         );
         defer allocator.free(zolt_dispatch);
@@ -2866,9 +2866,9 @@ test "parseTelegramRunOptions sets default dispatch command when --zolt enabled"
     try testing.expect(dispatch.mode == .argv);
     try testing.expect(dispatch.argv.len == 5);
     try testing.expectEqualStrings("zolt", dispatch.argv[0]);
-    try testing.expectEqualStrings("--session", dispatch.argv[1]);
-    try testing.expectEqualStrings("{session}", dispatch.argv[2]);
-    try testing.expectEqualStrings("--message", dispatch.argv[3]);
+    try testing.expectEqualStrings("run", dispatch.argv[1]);
+    try testing.expectEqualStrings("--session", dispatch.argv[2]);
+    try testing.expectEqualStrings("{session}", dispatch.argv[3]);
     try testing.expectEqualStrings("{message}", dispatch.argv[4]);
 }
 

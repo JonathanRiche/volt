@@ -56,7 +56,7 @@ curl -H "Authorization: Bearer volt-gateway-token" \
   http://127.0.0.1:18789/invoke
 ```
 
-With `--zolt`, Volt executes `zolt --session <session_key> --message <message>`.
+With `--zolt`, Volt executes `zolt run --session <session_key> {message}`.
 
 Gateway session IDs are resolved as:
 

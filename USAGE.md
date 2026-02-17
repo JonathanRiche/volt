@@ -41,9 +41,9 @@ volt --telegram [--token <token>] [--account <id>] [--home <path>] [--dispatch <
 
 `--zolt` enables a preset dispatch mapping to:
 
-`zolt --session {session}` plus your configured message handling.
+`zolt run --session {session} {message}` plus your configured message handling.
 
-Run `zolt -h` to check supported flags (for example `-s` / `--session`).
+Run `zolt run -h` to check supported flags (for example `-s` / `--session`).
 
 `--zolt-path <path>` sets the exact executable used for zolt mode, overriding `zolt` in PATH.
 You can also set `VOLT_ZOLT_PATH`.
@@ -78,7 +78,7 @@ curl -H "Authorization: Bearer volt-gateway-token" \
 With `--zolt`, this produces the command:
 
 ```bash
-zolt --session gateway:work:123 --message ping
+zolt run --session gateway:work:123 ping
 ```
 
 If `session` is omitted, Volt will generate `gateway:work:123` from the account and chat_id.
@@ -117,7 +117,7 @@ Defaults:
 - Bind: `127.0.0.1`
 - Port: `18789`
 - Default dispatch:
-  - `zolt --session {session} --message {message}` when `--zolt` is used
+- `zolt run --session {session} {message}` when `--zolt` is used
   - otherwise no dispatch (`--dispatch` required for non-zolt mode)
 
 Auth:
