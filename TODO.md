@@ -21,14 +21,19 @@
 - Bundled zolt support in `build.zig`:
   - local source auto-discovery.
   - optional dependency install.
+- `volt gateway` command:
+  - runs a local HTTP `/health`, `/gateway/health`, `/gateway/status`, and `/invoke` server.
+  - supports default dispatch via `--zolt` and `--dispatch`.
+  - supports token auth resolution (`--auth-token`, env, config).
+  - includes parser and route/payload tests.
 - Initial compatibility docs (`README.md`, `USAGE.md`), tests for parser/dispatch helpers.
 
-## OpenClaw parity gaps to implement
+## Reference parity gaps to implement
 
-OpenClaw has a much broader surface. The items below are not yet in Volt:
+The original reference has a much broader surface. The items below are not yet in Volt:
 
 - Core command surface:
-  - `setup`, `onboard`, `configure`, `config`, `doctor`, `dashboard`, `reset`,
+- `setup`, `onboard`, `configure`, `config`, `doctor`, `dashboard`, `reset`,
     `uninstall`, `update`, `status`, `health`, `gateway`, `pairing`, `plugins`,
     `approvals`, `security`, `memory`, `sessions`, `logs`, `system`,
     `models`, `nodes/devices/browser/cron/webhooks/hardware tools`, `skills`,
@@ -38,7 +43,7 @@ OpenClaw has a much broader surface. The items below are not yet in Volt:
   - No device/channel/node orchestration loop.
   - No session daemoning / remote WS protocol.
 - Channel coverage:
-  - Telegram-only today; OpenClaw also includes WhatsApp, Slack, Discord, Google Chat,
+  - Telegram-only today; the reference also includes WhatsApp, Slack, Discord, Google Chat,
     Signal, Teams, Matrix, iMessage/macOS bridges, iOS/Android nodes, etc.
 - Tooling and automation:
   - No browser tooling, cron/webhook runtime, hooks, pairing approvals workflow,
@@ -50,7 +55,7 @@ OpenClaw has a much broader surface. The items below are not yet in Volt:
 ## Testing TODOs (for parity + reliability)
 
 - Add Volt CLI/behavior tests for:
-  - OpenClaw-style command flags and aliases as we add them.
+  - reference-style command flags and aliases as we add them.
   - Telegram poller behavior under malformed updates and empty response handling.
   - Allowlist and token-resolution precedence end-to-end.
   - `--zolt` auto-discovery and dispatch validation failures.

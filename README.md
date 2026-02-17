@@ -17,6 +17,12 @@ zig build run -- --help
 
 By default, Volt uses `~/.volt` as the workspace root (or `--home`).
 
+Initialize workspace layout with:
+
+```bash
+volt init --home ~/.volt
+```
+
 Volt can bundle a local `zolt` checkout so `--zolt` can run without a preinstalled system `zolt` binary. When bundling is enabled, Volt prefers:
 
 1. local source via `-Dzolt-source=...` (or `../zolt` if present),
@@ -33,6 +39,21 @@ If you want to refresh the zolt package hash yourself:
 
 ```bash
 zig fetch --save git+https://github.com/JonathanRiche/zolt
+```
+
+## Gateway mode quick start
+
+```bash
+zig build run -- gateway --home ~/.volt --port 18789 --zolt
+```
+
+Then send a POST to:
+
+```bash
+curl -H "Authorization: Bearer volt-gateway-token" \
+  -H "Content-Type: application/json" \
+  -d '{"message":"hello","chat_id":123}' \
+  http://127.0.0.1:18789/invoke
 ```
 
 ## Documentation

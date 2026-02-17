@@ -83,6 +83,57 @@ or equivalent:
 volt --telegram --zolt
 ```
 
+### `volt gateway`
+
+Start a tiny HTTP gateway for text-message style clients.
+
+```bash
+volt gateway [--home <path>] [--bind <ip>] [--port <port>] [--account <id>] [--dispatch <command>] [--zolt] [--zolt-path <path>] [--auth-token <token>]
+```
+
+Defaults:
+
+- Workspace path: `~/.volt`
+- Bind: `127.0.0.1`
+- Port: `18789`
+- Default dispatch:
+  - `zolt --session {session} --message {message}` when `--zolt` is used
+  - otherwise no dispatch (`--dispatch` required for non-zolt mode)
+
+Auth:
+
+- `--auth-token` is resolved first, then `VOLT_GATEWAY_TOKEN`, then `gateway.auth.token` in `volt.json`.
+- Default fallback token is `volt-gateway-token`.
+- The request is authorized via either:
+  - `Authorization: Bearer <token>`
+  - `X-Volt-Gateway-Token: <token>`
+
+HTTP paths:
+
+- `GET /health` or `GET /gateway/health`: readiness check.
+- `GET /gateway/status`: runtime and config info.
+- `POST /invoke`: dispatch a payload.
+
+`/invoke` expects JSON body containing one of:
+
+- `message`
+- `text`
+
+Optional fields:
+
+- `chat_id`
+- `account`
+- `session`
+
+Example:
+
+```bash
+curl -H "Authorization: Bearer volt-gateway-token" \
+  -H "Content-Type: application/json" \
+  -d '{"message":"ping","chat_id":123}' \
+  http://127.0.0.1:18789/invoke
+```
+
 ### No args
 
 Running `volt` with no args starts local command passthrough mode (read a line from stdin, execute it as shell command, print output).
@@ -94,6 +145,7 @@ Running `volt` with no args starts local command passthrough mode (read a line f
 - `VOLT_CONFIG_PATH`
 - `TELEGRAM_BOT_TOKEN`
 - `VOLT_ZOLT_PATH`
+- `VOLT_GATEWAY_TOKEN`
 
 ## Build flags
 
@@ -137,6 +189,14 @@ volt --telegram --home ~/.volt
 ```bash
 volt --telegram --home ~/.volt --account work
 ```
+
+### Run a local gateway with zolt dispatch
+
+```bash
+volt gateway --home ~/.volt --zolt --auth-token my-secret-token
+```
+
+Then configure clients to POST to `http://127.0.0.1:18789/invoke`.
 
 ### Use account-specific allow list while keeping separate default allow list
 

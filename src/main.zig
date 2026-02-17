@@ -121,6 +121,29 @@ const TelegramRunOptions = struct {
     account: ?[]const u8,
 };
 
+const GatewayRunOptions = struct {
+    home_path: ?[]const u8,
+    bind: []const u8,
+    port: u16,
+    account: ?[]const u8,
+    dispatch: ?[]const u8,
+    zolt: bool,
+    zolt_command: ?[]const u8,
+    auth_token: ?[]const u8,
+};
+
+const GatewayInvokePayload = struct {
+    message: ?[]const u8 = null,
+    text: ?[]const u8 = null,
+    account: ?[]const u8 = null,
+    chat_id: ?i64 = null,
+    session: ?[]const u8 = null,
+};
+
+const GatewayRoute = enum { health, status, invoke, unknown };
+
+const GatewayError = error{ GatewayAuthMissing, GatewayBadRequest };
+
 const DefaultZoltDispatch = "zolt --session {session} --message {message}";
 
 const DispatchMode = enum { shell, argv };
@@ -171,6 +194,8 @@ const DefaultOffsetJson = "{\"version\":1,\"lastUpdateId\":0}";
 const DefaultPairingJson = "{\"version\":1,\"requests\":[]}";
 const DefaultUpdateCheckJson = "{\"lastCheckedAt\":\"1970-01-01T00:00:00.000Z\"}";
 const DefaultGatewayToken = "volt-gateway-token";
+const DefaultGatewayBind = "127.0.0.1";
+const MaxGatewayRequestSize = 64 * 1024;
 const DefaultAccountId = "default";
 const DefaultCommandCheckArgv = [_][]const u8{ "--help", "-h" };
 
@@ -188,6 +213,7 @@ fn printUsage() !void {
         "  volt init [--mirror-volt] [--source <path>] [--home <path>] [--force]\n" ++
         "  volt telegram setup --token <token> [--account <id>] [--allow-from <chat_id>]... [--home <path>] [--force]\n" ++
         "  volt --telegram [--token <token>] [--account <id>] [--home <path>] [--dispatch <command>] [--zolt] [--zolt-path <path>] [--poll-ms <ms>]\n" ++
+        "  volt gateway [--home <path>] [--bind <ip>] [--port <port>] [--account <id>] [--dispatch <command>] [--zolt] [--zolt-path <path>] [--auth-token <token>]\n" ++
         "\n" ++
         "Dispatch placeholders (for --dispatch args):\n" ++
         "  {message} / {text}, {chat_id}, {account}, {session}\n" ++
@@ -238,6 +264,12 @@ pub fn main() !void {
         return;
     }
 
+    if (std.mem.eql(u8, args[1], "gateway")) {
+        const opts = try parseGatewayOptions(args[2..]);
+        try runGateway(allocator, opts);
+        return;
+    }
+
     if (std.mem.eql(u8, args[1], "--telegram")) {
         const opts = try parseTelegramRunOptions(args[2..]);
         try runTelegramGateway(allocator, opts);
@@ -275,6 +307,359 @@ fn runLocalGateway(allocator: Allocator) !void {
             }
         }
     }
+}
+
+fn runGateway(allocator: Allocator, opts: GatewayRunOptions) !void {
+    const root = try resolveHomePath(allocator, opts.home_path);
+    defer allocator.free(root);
+
+    const default_account = try normalizeAccountId(allocator, opts.account);
+    defer allocator.free(default_account);
+
+    const auth_token = try resolveGatewayAuthToken(allocator, root, opts.auth_token);
+    defer allocator.free(auth_token);
+
+    const dispatch = if (opts.zolt) dispatch_block: {
+        const zolt_cmd = try resolveZoltCommand(allocator, opts.zolt_command);
+        defer allocator.free(zolt_cmd);
+
+        const zolt_dispatch = try std.fmt.allocPrint(
+            allocator,
+            "{s} --session {s} --message {s}",
+            .{ zolt_cmd, "{session}", "{message}" },
+        );
+        defer allocator.free(zolt_dispatch);
+
+        validateDispatchExecutable(allocator, zolt_cmd) catch |err| {
+            switch (err) {
+                error.DispatchBinaryNotFound => {
+                    try std.fs.File.stderr().deprecatedWriter().print(
+                        "volt: dispatch binary not found: {s}\n",
+                        .{zolt_cmd},
+                    );
+                },
+                error.DispatchBinaryNotExecutable => {
+                    try std.fs.File.stderr().deprecatedWriter().print(
+                        "volt: dispatch binary not executable: {s}\n",
+                        .{zolt_cmd},
+                    );
+                },
+                else => {
+                    try std.fs.File.stderr().deprecatedWriter().print(
+                        "volt: dispatch validation failed: {s}\n",
+                        .{@errorName(err)},
+                    );
+                },
+            }
+            return err;
+        };
+
+        break :dispatch_block try parseDispatchPlan(allocator, zolt_dispatch);
+    } else try parseDispatchPlan(allocator, opts.dispatch);
+    defer deinitDispatchPlan(allocator, dispatch);
+
+    const bind = resolveGatewayBind(opts.bind);
+    const listener = try std.net.Address.parseIp(bind, opts.port).listen(.{
+        .reuse_address = true,
+        .kernel_backlog = 128,
+    });
+    defer listener.deinit();
+
+    try std.io.getStdErr().writer().print(
+        "volt: gateway listening on http://{s}:{d}\n",
+        .{ bind, opts.port },
+    );
+
+    var ctx = GatewayRequestContext{
+        .dispatch = dispatch,
+        .default_account = default_account,
+        .auth_token = auth_token,
+        .bind = bind,
+        .port = opts.port,
+    };
+
+    while (true) {
+        const connection = try listener.accept();
+        runGatewayConnection(allocator, connection, &ctx) catch |err| {
+            std.log.err("gateway connection failed: {s}", .{@errorName(err)});
+        };
+    }
+}
+
+const GatewayRequestContext = struct {
+    dispatch: DispatchPlan,
+    default_account: []const u8,
+    auth_token: []const u8,
+    bind: []const u8,
+    port: u16,
+};
+
+fn runGatewayConnection(
+    allocator: Allocator,
+    connection: std.net.Server.Connection,
+    ctx: *const GatewayRequestContext,
+) !void {
+    defer connection.stream.close();
+
+    var read_buffer: [4096]u8 = undefined;
+    var write_buffer: [4096]u8 = undefined;
+    var req_reader = connection.stream.reader(&read_buffer);
+    var req_writer = connection.stream.writer(&write_buffer);
+    var server = std.http.Server.init(&req_reader.interface, &req_writer.interface);
+
+    while (true) {
+        const request = server.receiveHead() catch |err| return switch (err) {
+            error.HttpConnectionClosing => return,
+            else => err,
+        };
+
+        try serveGatewayRequest(
+            allocator,
+            request,
+            ctx,
+        );
+
+        if (!request.head.keep_alive) return;
+    }
+}
+
+fn serveGatewayRequest(
+    allocator: Allocator,
+    request: std.http.Server.Request,
+    ctx: *const GatewayRequestContext,
+) !void {
+    const route = parseGatewayRoute(request.head.target);
+
+    switch (route) {
+        .health => {
+            if (request.head.method != .GET and request.head.method != .HEAD) {
+                return respondGatewayJson(
+                    allocator,
+                    request,
+                    .method_not_allowed,
+                    .{ .status = "error", .message = "method not allowed", .path = request.head.target },
+                );
+            }
+
+            return respondGatewayJson(
+                allocator,
+                request,
+                .ok,
+                .{
+                    .status = "ok",
+                    .service = "volt-gateway",
+                    .bind = ctx.bind,
+                    .port = ctx.port,
+                },
+            );
+        },
+        .status => {
+            if (request.head.method != .GET and request.head.method != .HEAD) {
+                return respondGatewayJson(
+                    allocator,
+                    request,
+                    .method_not_allowed,
+                    .{ .status = "error", .message = "method not allowed", .path = request.head.target },
+                );
+            }
+
+            return respondGatewayJson(
+                allocator,
+                request,
+                .ok,
+                .{
+                    .status = "ok",
+                    .service = "volt-gateway",
+                    .transport = "http",
+                    .dispatch = switch (ctx.dispatch.mode) {
+                        .shell => "shell",
+                        .argv => "argv",
+                    },
+                    .defaultAccount = ctx.default_account,
+                    .bind = ctx.bind,
+                    .port = ctx.port,
+                },
+            );
+        },
+        .invoke => {
+            if (!isGatewayAuthorized(request, ctx.auth_token)) {
+                return respondGatewayJson(
+                    allocator,
+                    request,
+                    .unauthorized,
+                    .{ .status = "error", .message = "missing or invalid token" },
+                );
+            }
+            if (request.head.method != .POST) {
+                return respondGatewayJson(
+                    allocator,
+                    request,
+                    .method_not_allowed,
+                    .{ .status = "error", .message = "method not allowed", .path = request.head.target },
+                );
+            }
+
+            const response = handleGatewayInvoke(allocator, request, ctx) catch |err| {
+                switch (err) {
+                    error.GatewayBadRequest => return respondGatewayJson(
+                        allocator,
+                        request,
+                        .bad_request,
+                        .{ .status = "error", .message = "invalid payload", .path = request.head.target },
+                    ),
+                    else => return respondGatewayJson(
+                        allocator,
+                        request,
+                        .internal_server_error,
+                        .{ .status = "error", .message = @errorName(err), .path = request.head.target },
+                    ),
+                }
+            };
+            defer allocator.free(response);
+
+            return respondGatewayJson(
+                allocator,
+                request,
+                .ok,
+                .{
+                    .status = "ok",
+                    .response = response,
+                },
+            );
+        },
+        .unknown => {
+            return respondGatewayJson(
+                allocator,
+                request,
+                .not_found,
+                .{ .status = "error", .message = "not found", .path = request.head.target },
+            );
+        },
+    }
+}
+
+fn handleGatewayInvoke(
+    allocator: Allocator,
+    request: std.http.Server.Request,
+    ctx: *const GatewayRequestContext,
+) ![]u8 {
+    const body = try readGatewayBody(allocator, request);
+    defer allocator.free(body);
+
+    const payload = try parseGatewayInvokePayload(allocator, body);
+    defer payload.deinit();
+
+    const message = payload.value.message orelse payload.value.text orelse return error.GatewayBadRequest;
+    const account = if (payload.value.account) |raw| blk: {
+        break :blk try normalizeAccountId(allocator, raw);
+    } else try allocator.dupe(u8, ctx.default_account);
+    defer allocator.free(account);
+
+    const session_key = if (payload.value.session) |raw_session| blk: {
+        break :blk try allocator.dupe(u8, raw_session);
+    } else if (payload.value.chat_id) |chat_id| blk: {
+        break :blk try std.fmt.allocPrint(allocator, "gateway:{s}:{d}", .{ account, chat_id });
+    } else blk: {
+        break :blk try std.fmt.allocPrint(allocator, "gateway:{s}", .{account});
+    };
+    defer allocator.free(session_key);
+
+    const dispatch_ctx = TelegramDispatchContext{
+        .message = message,
+        .account = account,
+        .chat_id = payload.value.chat_id orelse 0,
+        .session_key = session_key,
+    };
+
+    return executeDispatchForTelegram(allocator, ctx.dispatch, dispatch_ctx);
+}
+
+fn parseGatewayRoute(target: []const u8) GatewayRoute {
+    const path = if (std.mem.indexOfScalar(u8, target, '?')) |idx|
+        target[0..idx]
+    else
+        target;
+
+    if (std.mem.eql(u8, path, "/health")) return .health;
+    if (std.mem.eql(u8, path, "/gateway/health")) return .health;
+    if (std.mem.eql(u8, path, "/gateway/status")) return .status;
+    if (std.mem.eql(u8, path, "/invoke")) return .invoke;
+    return .unknown;
+}
+
+fn respondGatewayJson(
+    allocator: Allocator,
+    request: std.http.Server.Request,
+    status: std.http.Status,
+    payload: anytype,
+) !void {
+    var out = std.Io.Writer.Allocating.init(allocator);
+    defer out.deinit();
+
+    var stringify = std.json.Stringify{ .writer = &out.writer, .options = .{} };
+    try stringify.write(payload);
+    const body = try out.toOwnedSlice();
+    defer allocator.free(body);
+
+    const headers = [_]std.http.Header{.{ .name = "content-type", .value = "application/json" }};
+    try request.respond(body, .{ .status = status, .extra_headers = &headers });
+}
+
+fn readGatewayBody(allocator: Allocator, request: std.http.Server.Request) ![]u8 {
+    if (request.head.content_length == null and request.head.transfer_encoding == .none) {
+        return try allocator.dupe(u8, "");
+    }
+
+    const content_length = request.head.content_length orelse MaxGatewayRequestSize;
+    if (content_length > MaxGatewayRequestSize) {
+        return error.GatewayBadRequest;
+    }
+
+    var body_buffer: [4096]u8 = undefined;
+    const body_reader = request.readerExpectNone(&body_buffer);
+    return body_reader.readAllAlloc(allocator, MaxGatewayRequestSize);
+}
+
+fn parseGatewayInvokePayload(allocator: Allocator, body: []const u8) !std.json.Parsed(GatewayInvokePayload) {
+    if (body.len == 0) return error.GatewayBadRequest;
+    return std.json.parseFromSlice(
+        GatewayInvokePayload,
+        allocator,
+        body,
+        .{ .ignore_unknown_fields = true },
+    ) catch error.GatewayBadRequest;
+}
+
+fn isGatewayAuthorized(request: std.http.Server.Request, token: []const u8) bool {
+    if (token.len == 0) return true;
+
+    var headers = request.iterateHeaders();
+    while (headers.next()) |header| {
+        if (std.ascii.eqlIgnoreCase(header.name, "authorization")) {
+            const value = std.mem.trim(u8, header.value, " \\t");
+            const prefix = "Bearer ";
+            if (std.mem.startsWith(u8, value, prefix) and std.mem.eql(u8, value[prefix.len..], token)) {
+                return true;
+            }
+            if (std.mem.eql(u8, value, token)) {
+                return true;
+            }
+        }
+
+        if (std.ascii.eqlIgnoreCase(header.name, "x-volt-gateway-token") and
+            std.mem.eql(u8, std.mem.trim(u8, header.value, " \\t"), token))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+fn resolveGatewayBind(raw: []const u8) std.net.Address {
+    const trimmed = std.mem.trim(u8, raw, " \t\r\n");
+    if (trimmed.len == 0) return DefaultGatewayBind;
+    if (std.mem.eql(u8, trimmed, "localhost")) return "127.0.0.1";
+    return trimmed;
 }
 
 fn runInit(allocator: Allocator, opts: InitOptions) !void {
@@ -758,6 +1143,83 @@ fn parseTelegramRunOptions(args: []const []const u8) !TelegramRunOptions {
         if (std.mem.eql(u8, arg, "--poll-ms")) {
             if (idx + 1 >= args.len) return error.UnexpectedArgument;
             result.poll_ms = try std.fmt.parseInt(u64, args[idx + 1], 10);
+            idx += 1;
+            continue;
+        }
+        return error.UnknownArgument;
+    }
+
+    if (result.zolt_command != null and !result.zolt) {
+        return error.UnexpectedArgument;
+    }
+
+    return result;
+}
+
+fn parseGatewayOptions(args: []const []const u8) !GatewayRunOptions {
+    var result = GatewayRunOptions{
+        .home_path = null,
+        .bind = DefaultGatewayBind,
+        .port = 18789,
+        .account = null,
+        .dispatch = null,
+        .zolt = false,
+        .zolt_command = null,
+        .auth_token = null,
+    };
+
+    var idx: usize = 0;
+    while (idx < args.len) : (idx += 1) {
+        const arg = args[idx];
+        if (std.mem.eql(u8, arg, "--home")) {
+            if (idx + 1 >= args.len) return error.UnexpectedArgument;
+            result.home_path = args[idx + 1];
+            idx += 1;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--bind")) {
+            if (idx + 1 >= args.len) return error.UnexpectedArgument;
+            result.bind = args[idx + 1];
+            idx += 1;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--port")) {
+            if (idx + 1 >= args.len) return error.UnexpectedArgument;
+            result.port = try std.fmt.parseInt(u16, args[idx + 1], 10);
+            idx += 1;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--account")) {
+            if (idx + 1 >= args.len) return error.UnexpectedArgument;
+            result.account = args[idx + 1];
+            idx += 1;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--dispatch")) {
+            if (idx + 1 >= args.len) return error.UnexpectedArgument;
+            if (result.zolt) {
+                return error.UnexpectedArgument;
+            }
+            result.dispatch = args[idx + 1];
+            idx += 1;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--zolt")) {
+            if (result.dispatch != null) {
+                return error.UnexpectedArgument;
+            }
+            result.zolt = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--zolt-path")) {
+            if (idx + 1 >= args.len) return error.UnexpectedArgument;
+            result.zolt_command = args[idx + 1];
+            idx += 1;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--auth-token")) {
+            if (idx + 1 >= args.len) return error.UnexpectedArgument;
+            result.auth_token = args[idx + 1];
             idx += 1;
             continue;
         }
@@ -1628,6 +2090,51 @@ fn resolveTelegramTokenFromConfig(
     return allocator.dupe(u8, "");
 }
 
+fn resolveGatewayAuthToken(
+    allocator: Allocator,
+    root: []const u8,
+    explicit: ?[]const u8,
+) ![]u8 {
+    if (explicit) |token| {
+        return allocator.dupe(u8, token);
+    }
+
+    if (std.process.getEnvVarOwned(allocator, "VOLT_GATEWAY_TOKEN")) |env_token| {
+        defer allocator.free(env_token);
+        const trimmed = std.mem.trim(u8, env_token, " \t\r\n");
+        if (trimmed.len > 0) {
+            return allocator.dupe(u8, trimmed);
+        }
+    } else |err| {
+        if (err != error.EnvironmentVariableNotFound) return err;
+    }
+
+    const path = resolveConfigPath(allocator, root) catch |err| {
+        return switch (err) {
+            error.FileNotFound => allocator.dupe(u8, DefaultGatewayToken),
+            else => return err,
+        };
+    };
+    defer allocator.free(path);
+
+    const data = readFileAlloc(allocator, path) catch |err| {
+        if (err == error.FileNotFound) return allocator.dupe(u8, DefaultGatewayToken);
+        return err;
+    };
+    defer allocator.free(data);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, data, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+
+    const token = resolveJsonStringField(&parsed.value, &.{ "gateway", "auth", "token" }) orelse DefaultGatewayToken;
+    const trimmed = std.mem.trim(u8, token, " \t\r\n");
+    if (trimmed.len == 0) {
+        return allocator.dupe(u8, "");
+    }
+
+    return allocator.dupe(u8, trimmed);
+}
+
 fn resolveTelegramOffsetPath(
     allocator: Allocator,
     root: []const u8,
@@ -1763,6 +2270,81 @@ test "resolveTelegramTokenFromConfig supports tokenFile, botToken, and normalize
     );
     defer allocator.free(default_token);
     try testing.expect(std.mem.eql(u8, default_token, "from-file"));
+}
+
+test "parseGatewayOptions parses all supported args" {
+    const opts = try parseGatewayOptions(&.{
+        "--home",
+        "/tmp/volt",
+        "--bind",
+        "127.0.0.2",
+        "--port",
+        "19999",
+        "--account",
+        "Work Team",
+        "--dispatch",
+        "zolt --message {message}",
+        "--auth-token",
+        "token123",
+    });
+
+    try testing.expect(opts.home_path != null);
+    try testing.expectEqualStrings("/tmp/volt", opts.home_path.?);
+    try testing.expectEqualStrings("127.0.0.2", opts.bind);
+    try testing.expectEqual(@as(u16, 19999), opts.port);
+    try testing.expectEqualStrings("Work Team", opts.account.?);
+    try testing.expectEqualStrings("zolt --message {message}", opts.dispatch.?);
+    try testing.expect(!opts.zolt);
+    try testing.expect(opts.zolt_command == null);
+    try testing.expectEqualStrings("token123", opts.auth_token.?);
+}
+
+test "parseGatewayOptions supports --zolt and enforces exclusivity" {
+    const opts = try parseGatewayOptions(&.{ "--zolt", "--zolt-path", "/usr/local/bin/zolt" });
+    try testing.expect(opts.zolt);
+    try testing.expect(opts.dispatch == null);
+    try testing.expectEqualStrings("/usr/local/bin/zolt", opts.zolt_command.?);
+
+    try testing.expectError(
+        error.UnexpectedArgument,
+        parseGatewayOptions(&.{ "--zolt", "--dispatch", "zolt --message {message}" }),
+    );
+    try testing.expectError(
+        error.UnexpectedArgument,
+        parseGatewayOptions(&.{ "--zolt-path", "/usr/local/bin/zolt" }),
+    );
+}
+
+test "parseGatewayRoute recognizes supported paths" {
+    try testing.expect(parseGatewayRoute("/health") == .health);
+    try testing.expect(parseGatewayRoute("/gateway/health") == .health);
+    try testing.expect(parseGatewayRoute("/gateway/status") == .status);
+    try testing.expect(parseGatewayRoute("/invoke") == .invoke);
+    try testing.expect(parseGatewayRoute("/unknown") == .unknown);
+}
+
+test "parseGatewayInvokePayload parses message/chat_id fields" {
+    const allocator = testing.allocator;
+    const payload = try parseGatewayInvokePayload(
+        allocator,
+        "{\"message\":\"hello\",\"chat_id\":123,\"account\":\"work\",\"session\":\"abc\"}",
+    );
+    defer payload.deinit();
+
+    try testing.expect(payload.value.message != null);
+    try testing.expectEqualStrings("hello", payload.value.message.?);
+    try testing.expectEqual(@as(i64, 123), payload.value.chat_id.?);
+    try testing.expectEqualStrings("work", payload.value.account.?);
+    try testing.expectEqualStrings("abc", payload.value.session.?);
+    try testing.expect(payload.value.text == null);
+}
+
+test "parseGatewayInvokePayload rejects invalid json" {
+    const allocator = testing.allocator;
+    try testing.expectError(
+        error.GatewayBadRequest,
+        parseGatewayInvokePayload(allocator, "{not json}"),
+    );
 }
 
 test "parseDispatchPlan keeps shell behavior for missing dispatch" {
