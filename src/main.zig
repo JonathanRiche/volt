@@ -1842,3 +1842,94 @@ test "dispatch rendering replaces session placeholders" {
     try testing.expectEqualStrings("work", rendered[6]);
     try testing.expectEqualStrings("status update", rendered[7]);
 }
+
+test "parseInitOptions parses mirror-volt and source/home paths" {
+    const opts = try parseInitOptions(&.{ "--mirror-volt", "--force", "--home", "/tmp/volt-home", "--source", "/tmp/volt-source" });
+    try testing.expect(opts.mirror_volt);
+    try testing.expect(opts.force);
+    try testing.expectEqualStrings("/tmp/volt-home", opts.home_path.?);
+    try testing.expectEqualStrings("/tmp/volt-source", opts.source_path.?);
+}
+
+test "parseInitOptions rejects unknown argument" {
+    try testing.expectError(error.UnknownArgument, parseInitOptions(&.{"--foo"}));
+}
+
+test "parseTelegramSetupOptions deduplicates allow-from entries" {
+    const allocator = testing.allocator;
+    var opts = try parseTelegramSetupOptions(allocator, &.{ "--allow-from", "111", "--allow-from", "222", "--allow-from", "111", "--allow-from", " 333 " });
+    defer opts.allow_from.deinit(allocator);
+
+    try testing.expectEqual(@as(usize, 3), opts.allow_from.items.len);
+    try testing.expectEqualStrings("111", opts.allow_from.items[0]);
+    try testing.expectEqualStrings("222", opts.allow_from.items[1]);
+    try testing.expectEqualStrings("333", opts.allow_from.items[2]);
+}
+
+test "parseTelegramRunOptions rejects --zolt-path without --zolt" {
+    try testing.expectError(
+        error.UnexpectedArgument,
+        parseTelegramRunOptions(&.{ "--zolt-path", "/usr/local/bin/zolt" }),
+    );
+}
+
+test "resolveExpandedPath handles home expansion and whitespace" {
+    const allocator = testing.allocator;
+
+    const trimmed = try resolveExpandedPath(allocator, "   ./relative/path   ", "/fallback");
+    defer allocator.free(trimmed);
+    try testing.expectEqualStrings("./relative/path", trimmed);
+
+    const tilde = try resolveExpandedPath(allocator, "   ~/foo/bar", "/fallback");
+    defer allocator.free(tilde);
+    try testing.expectEqualStrings("/fallback/foo/bar", tilde);
+
+    const bare_tilde = try resolveExpandedPath(allocator, "   ~ ", "/fallback");
+    defer allocator.free(bare_tilde);
+    try testing.expectEqualStrings("/fallback", bare_tilde);
+
+    const empty = try resolveExpandedPath(allocator, "   ", "/fallback");
+    defer allocator.free(empty);
+    try testing.expectEqualStrings(".", empty);
+}
+
+test "parseCommandLineTokens strips single and double quoted tokens" {
+    const allocator = testing.allocator;
+    const tokens = try parseCommandLineTokens(allocator, "echo 'hello' \"world\"");
+    defer {
+        for (tokens) |token| allocator.free(token);
+        allocator.free(tokens);
+    }
+
+    try testing.expectEqual(@as(usize, 3), tokens.len);
+    try testing.expectEqualStrings("echo", tokens[0]);
+    try testing.expectEqualStrings("hello", tokens[1]);
+    try testing.expectEqualStrings("world", tokens[2]);
+}
+
+test "chatAllowed supports default open and allowlist matching" {
+    const allow_empty = [_][]const u8{};
+    try testing.expect(chatAllowed(allow_empty[0..], 123));
+
+    const allow = [_][]const u8{ "123", "456" };
+    try testing.expect(chatAllowed(allow[0..], 123));
+    try testing.expect(!chatAllowed(allow[0..], 789));
+}
+
+test "clampPollInterval enforces minimum" {
+    try testing.expectEqual(@as(u64, 250), clampPollInterval(1));
+    try testing.expectEqual(@as(u64, 250), clampPollInterval(250));
+    try testing.expectEqual(@as(u64, 1000), clampPollInterval(1000));
+}
+
+test "resolveTelegramOffsetPath uses account-specific naming" {
+    const allocator = testing.allocator;
+
+    const default_path = try resolveTelegramOffsetPath(allocator, "/workspace", DefaultAccountId);
+    defer allocator.free(default_path);
+    try testing.expectEqualStrings("/workspace/telegram/update-offset-default.json", default_path);
+
+    const account_path = try resolveTelegramOffsetPath(allocator, "/workspace", "work");
+    defer allocator.free(account_path);
+    try testing.expectEqualStrings("/workspace/telegram/update-offset-work.json", account_path);
+}
