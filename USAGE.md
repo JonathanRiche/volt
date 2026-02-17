@@ -132,6 +132,25 @@ curl -H "Authorization: Bearer volt-gateway-token" \
   -H "Content-Type: application/json" \
   -d '{"message":"ping","chat_id":123}' \
   http://127.0.0.1:18789/invoke
+
+### `volt gateway` service
+
+Manage the gateway as a persistent background process with the platform service manager:
+
+```bash
+volt gateway install [--home <path>] [--bind <ip>] [--port <port>] [--account <id>] [--dispatch <command>] [--zolt] [--zolt-path <path>] [--auth-token <token>]
+volt gateway start [--home <path>] [--bind <ip>] [--port <port>] [--account <id>] [--dispatch <command>] [--zolt] [--zolt-path <path>] [--auth-token <token>]
+volt gateway stop [--home <path>] [--bind <ip>] [--port <port>] [--account <id>] [--dispatch <command>] [--zolt] [--zolt-path <path>] [--auth-token <token>]
+volt gateway restart [--home <path>] [--bind <ip>] [--port <port>] [--account <id>] [--dispatch <command>] [--zolt] [--zolt-path <path>] [--auth-token <token>]
+volt gateway status [--home <path>] [--bind <ip>] [--port <port>] [--account <id>] [--dispatch <command>] [--zolt] [--zolt-path <path>] [--auth-token <token>]
+volt gateway uninstall [--home <path>] [--bind <ip>] [--port <port>] [--account <id>] [--dispatch <command>] [--zolt] [--zolt-path <path>] [--auth-token <token>]
+```
+
+Notes:
+
+- Linux uses `systemd --user` units under `$XDG_CONFIG_HOME/systemd/user` (or `~/.config/systemd/user`).
+- macOS uses `~/Library/LaunchAgents/com.volt.gateway.plist`.
+- On macOS, `status` currently reports bootstrap state from `launchctl print`.
 ```
 
 ### No args

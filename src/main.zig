@@ -132,6 +132,8 @@ const GatewayRunOptions = struct {
     auth_token: ?[]const u8,
 };
 
+const GatewayServiceAction = enum { run, install, uninstall, start, stop, restart, status };
+
 const GatewayInvokePayload = struct {
     message: ?[]const u8 = null,
     text: ?[]const u8 = null,
@@ -143,6 +145,7 @@ const GatewayInvokePayload = struct {
 const GatewayRoute = enum { health, status, invoke, unknown };
 
 const GatewayError = error{ GatewayAuthMissing, GatewayBadRequest };
+const GatewayServiceError = error{ GatewayServiceUnsupportedPlatform, GatewayServiceCommandFailed };
 
 const DefaultZoltDispatch = "zolt --session {session} --message {message}";
 
@@ -196,6 +199,9 @@ const DefaultUpdateCheckJson = "{\"lastCheckedAt\":\"1970-01-01T00:00:00.000Z\"}
 const DefaultGatewayToken = "volt-gateway-token";
 const DefaultGatewayBind = "127.0.0.1";
 const MaxGatewayRequestSize = 64 * 1024;
+const GatewayServiceName = "volt-gateway";
+const GatewaySystemdUnit = "volt-gateway.service";
+const GatewayLaunchdLabel = "com.volt.gateway";
 const DefaultAccountId = "default";
 const DefaultCommandCheckArgv = [_][]const u8{ "--help", "-h" };
 
@@ -214,6 +220,7 @@ fn printUsage() !void {
         "  volt telegram setup --token <token> [--account <id>] [--allow-from <chat_id>]... [--home <path>] [--force]\n" ++
         "  volt --telegram [--token <token>] [--account <id>] [--home <path>] [--dispatch <command>] [--zolt] [--zolt-path <path>] [--poll-ms <ms>]\n" ++
         "  volt gateway [--home <path>] [--bind <ip>] [--port <port>] [--account <id>] [--dispatch <command>] [--zolt] [--zolt-path <path>] [--auth-token <token>]\n" ++
+        "  volt gateway install|start|stop|restart|status|uninstall [--home <path>] [--bind <ip>] [--port <port>] [--account <id>] [--dispatch <command>] [--zolt] [--zolt-path <path>] [--auth-token <token>]\n" ++
         "\n" ++
         "Dispatch placeholders (for --dispatch args):\n" ++
         "  {message} / {text}, {chat_id}, {account}, {session}\n" ++
@@ -265,6 +272,15 @@ pub fn main() !void {
     }
 
     if (std.mem.eql(u8, args[1], "gateway")) {
+        if (args.len >= 3) {
+            const action = parseGatewayServiceAction(args[2]);
+            if (action != .run) {
+                const opts = try parseGatewayOptions(args[3..]);
+                try runGatewayServiceAction(allocator, action, opts);
+                return;
+            }
+        }
+
         const opts = try parseGatewayOptions(args[2..]);
         try runGateway(allocator, opts);
         return;
@@ -655,7 +671,7 @@ fn isGatewayAuthorized(request: std.http.Server.Request, token: []const u8) bool
     return false;
 }
 
-fn resolveGatewayBind(raw: []const u8) std.net.Address {
+fn resolveGatewayBind(raw: []const u8) []const u8 {
     const trimmed = std.mem.trim(u8, raw, " \t\r\n");
     if (trimmed.len == 0) return DefaultGatewayBind;
     if (std.mem.eql(u8, trimmed, "localhost")) return "127.0.0.1";
@@ -1231,6 +1247,401 @@ fn parseGatewayOptions(args: []const []const u8) !GatewayRunOptions {
     }
 
     return result;
+}
+
+fn parseGatewayServiceAction(arg: []const u8) GatewayServiceAction {
+    if (std.mem.eql(u8, arg, "install")) return .install;
+    if (std.mem.eql(u8, arg, "uninstall")) return .uninstall;
+    if (std.mem.eql(u8, arg, "start")) return .start;
+    if (std.mem.eql(u8, arg, "stop")) return .stop;
+    if (std.mem.eql(u8, arg, "restart")) return .restart;
+    if (std.mem.eql(u8, arg, "status")) return .status;
+    return .run;
+}
+
+fn runGatewayServiceAction(
+    allocator: Allocator,
+    action: GatewayServiceAction,
+    opts: GatewayRunOptions,
+) !void {
+    switch (builtin.os.tag) {
+        .linux => {
+            try runGatewayServiceLinux(allocator, action, opts);
+        },
+        .macos => {
+            try runGatewayServiceMacos(allocator, action, opts);
+        },
+        else => return GatewayServiceError.GatewayServiceUnsupportedPlatform,
+    }
+}
+
+fn runGatewayServiceLinux(allocator: Allocator, action: GatewayServiceAction, opts: GatewayRunOptions) !void {
+    const exe_path = try std.fs.selfExePathAlloc(allocator);
+    defer allocator.free(exe_path);
+
+    const unit_path = try resolveGatewaySystemdServicePath(allocator);
+    defer allocator.free(unit_path);
+
+    switch (action) {
+        .install => {
+            const unit = try buildGatewaySystemdUnit(allocator, exe_path, opts);
+            defer allocator.free(unit);
+            try writeTextFile(unit_path, unit, true);
+            try runGatewayCommand(allocator, &.{ "systemctl", "--user", "daemon-reload" }, false);
+            try runGatewayCommand(allocator, &.{ "systemctl", "--user", "enable", GatewaySystemdUnit }, false);
+            try runGatewayCommand(allocator, &.{ "systemctl", "--user", "start", GatewaySystemdUnit }, false);
+            try std.io.getStdErr().writer().print("volt: installed gateway service: {s}\n", .{GatewaySystemdUnit});
+        },
+        .uninstall => {
+            try runGatewayCommandOrWarn(allocator, &.{ "systemctl", "--user", "stop", GatewaySystemdUnit });
+            try runGatewayCommandOrWarn(allocator, &.{ "systemctl", "--user", "disable", GatewaySystemdUnit });
+            if (std.fs.cwd().deleteFile(unit_path)) |_| {} else |err| if (err != error.FileNotFound) return err;
+            try runGatewayCommand(allocator, &.{ "systemctl", "--user", "daemon-reload" }, false);
+            try std.io.getStdErr().writer().print("volt: uninstalled gateway service: {s}\n", .{GatewaySystemdUnit});
+        },
+        .start => {
+            try runGatewayCommand(allocator, &.{ "systemctl", "--user", "start", GatewaySystemdUnit }, false);
+            try std.io.getStdErr().writer().print("volt: started gateway service\n", .{});
+        },
+        .stop => {
+            try runGatewayCommand(allocator, &.{ "systemctl", "--user", "stop", GatewaySystemdUnit }, true);
+            try std.io.getStdErr().writer().print("volt: stopped gateway service\n", .{});
+        },
+        .restart => {
+            try runGatewayCommand(allocator, &.{ "systemctl", "--user", "restart", GatewaySystemdUnit }, true);
+            try std.io.getStdErr().writer().print("volt: restarted gateway service\n", .{});
+        },
+        .status => {
+            var status = std.ArrayListUnmanaged(u8){};
+            defer status.deinit(allocator);
+            try status.appendSlice(allocator, "unknown");
+
+            try runGatewayCommandWithOutput(
+                allocator,
+                &.{ "systemctl", "--user", "is-active", GatewaySystemdUnit },
+                true,
+                &status,
+                true,
+            );
+
+            std.io.getStdErr().writer().print("volt: gateway service status: {s}\n", .{status.items}) catch {};
+        },
+        .run => return,
+    }
+}
+
+fn runGatewayServiceMacos(allocator: Allocator, action: GatewayServiceAction, opts: GatewayRunOptions) !void {
+    const exe_path = try std.fs.selfExePathAlloc(allocator);
+    defer allocator.free(exe_path);
+
+    const plist_path = try resolveGatewayLaunchdPlistPath(allocator);
+    defer allocator.free(plist_path);
+
+    const service_label = GatewayLaunchdLabel;
+    const gui_scope = try getLaunchdGuiScope(allocator);
+    defer allocator.free(gui_scope);
+    const launchd_service = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ gui_scope, service_label });
+    defer allocator.free(launchd_service);
+
+    switch (action) {
+        .install => {
+            const plist = try buildGatewayLaunchdPlist(allocator, exe_path, opts);
+            defer allocator.free(plist);
+            try writeTextFile(plist_path, plist, true);
+            try runGatewayCommand(allocator, &.{ "launchctl", "bootstrap", gui_scope, plist_path }, false);
+            try std.io.getStdErr().writer().print("volt: installed gateway service: {s}\n", .{service_label});
+        },
+        .uninstall => {
+            try runGatewayCommand(allocator, &.{ "launchctl", "bootout", gui_scope, plist_path }, true);
+            if (std.fs.cwd().deleteFile(plist_path)) |_| {} else |err| if (err != error.FileNotFound) return err;
+            try std.io.getStdErr().writer().print("volt: uninstalled gateway service: {s}\n", .{service_label});
+        },
+        .start => {
+            try runGatewayCommand(allocator, &.{ "launchctl", "bootstrap", gui_scope, plist_path }, false);
+            try std.io.getStdErr().writer().print("volt: started gateway service\n", .{});
+        },
+        .stop => {
+            try runGatewayCommandOrWarn(allocator, &.{ "launchctl", "bootout", gui_scope, launchd_service });
+            try std.io.getStdErr().writer().print("volt: stopped gateway service\n", .{});
+        },
+        .restart => {
+            try runGatewayCommandOrWarn(allocator, &.{ "launchctl", "bootout", gui_scope, launchd_service });
+            try runGatewayCommand(allocator, &.{ "launchctl", "bootstrap", gui_scope, plist_path }, false);
+            try std.io.getStdErr().writer().print("volt: restarted gateway service\n", .{});
+        },
+        .status => {
+            var status = std.ArrayListUnmanaged(u8){};
+            defer status.deinit(allocator);
+            try runGatewayCommandWithOutput(
+                allocator,
+                &.{ "launchctl", "print", launchd_service },
+                false,
+                &status,
+                true,
+            );
+            try std.io.getStdErr().writer().print("volt: gateway service status:\n{s}\n", .{status.items});
+        },
+        .run => return,
+    }
+}
+
+fn runGatewayCommand(allocator: Allocator, argv: []const []const u8, tolerate_failure: bool) !void {
+    return runGatewayCommandWithOutput(allocator, argv, false, null, tolerate_failure);
+}
+
+fn runGatewayCommandWithOutput(
+    allocator: Allocator,
+    argv: []const []const u8,
+    capture_output: bool,
+    output_sink: ?*std.ArrayListUnmanaged(u8),
+    tolerate_failure: bool,
+) !void {
+    const cmd = try std.process.Child.run(.{ .allocator = allocator, .argv = argv });
+    defer {
+        allocator.free(cmd.stdout);
+        allocator.free(cmd.stderr);
+    }
+
+    if (capture_output) {
+        if (output_sink) |sink| {
+            try sink.appendSlice(allocator, std.mem.trim(u8, cmd.stdout, " \r\n"));
+        }
+    }
+
+    switch (cmd.term) {
+        .Exited => |code| {
+            if (!tolerate_failure and code != 0) {
+                if (cmd.stderr.len > 0) {
+                    try std.io.getStdErr().writer().print(
+                        "volt: command failed: {s}\n",
+                        .{cmd.stderr},
+                    );
+                } else if (cmd.stdout.len > 0) {
+                    try std.io.getStdErr().writer().print(
+                        "volt: command failed: {s}\n",
+                        .{cmd.stdout},
+                    );
+                }
+                return GatewayServiceError.GatewayServiceCommandFailed;
+            }
+        },
+        else => if (!tolerate_failure) return GatewayServiceError.GatewayServiceCommandFailed,
+    }
+
+    if (cmd.term == .Exited) {
+        return;
+    }
+
+    return;
+}
+
+fn runGatewayCommandOrWarn(allocator: Allocator, argv: []const []const u8) !void {
+    runGatewayCommandWithOutput(allocator, argv, false, null, true) catch |err| switch (err) {
+        error.GatewayServiceCommandFailed => return,
+        else => return err,
+    };
+}
+
+fn getLaunchdGuiScope(allocator: Allocator) ![]u8 {
+    const uid = std.posix.getuid();
+    return try std.fmt.allocPrint(allocator, "gui/{d}", .{uid});
+}
+
+fn resolveGatewaySystemdServicePath(allocator: Allocator) ![]u8 {
+    const config_root = resolveGatewayXdgConfigRoot(allocator) catch return error.GatewayServiceUnsupportedPlatform;
+    const systemd_path = try joinPath(allocator, config_root, "systemd");
+    defer allocator.free(systemd_path);
+    const user_path = try joinPath(allocator, systemd_path, "user");
+    defer allocator.free(user_path);
+    try ensureDirIfMissing(user_path);
+    return try joinPath(allocator, user_path, GatewaySystemdUnit);
+}
+
+fn resolveGatewayXdgConfigRoot(allocator: Allocator) ![]u8 {
+    const xdg = std.process.getEnvVarOwned(allocator, "XDG_CONFIG_HOME") catch |err| {
+        if (err != error.EnvironmentVariableNotFound) return err;
+        const home = try resolveVoltHome(allocator);
+        defer allocator.free(home);
+        return try joinPath(allocator, home, ".config");
+    };
+    return xdg;
+}
+
+fn resolveGatewayLaunchdPlistPath(allocator: Allocator) ![]u8 {
+    const home = try resolveVoltHome(allocator);
+    defer allocator.free(home);
+    const support = try joinPath(allocator, home, "Library/LaunchAgents");
+    defer allocator.free(support);
+    try ensureDirIfMissing(support);
+    return try std.fmt.allocPrint(allocator, "{s}/{s}.plist", .{ support, GatewayLaunchdLabel });
+}
+
+fn buildGatewaySystemdUnit(allocator: Allocator, exe_path: []const u8, opts: GatewayRunOptions) ![]u8 {
+    var exec_start = std.ArrayListUnmanaged(u8){};
+    defer exec_start.deinit(allocator);
+
+    const escaped_exe = try systemdShellQuote(allocator, exe_path);
+    defer allocator.free(escaped_exe);
+    try exec_start.appendSlice(allocator, escaped_exe);
+    try exec_start.appendSlice(allocator, " gateway");
+    try appendGatewayServiceArg(allocator, &exec_start, "--home", opts.home_path);
+    try appendGatewayServiceArg(allocator, &exec_start, "--bind", opts.bind);
+    const port = try std.fmt.allocPrint(allocator, "{d}", .{opts.port});
+    defer allocator.free(port);
+    try appendGatewayServiceArg(allocator, &exec_start, "--port", port);
+    try appendGatewayServiceArg(allocator, &exec_start, "--account", opts.account);
+    if (opts.zolt) {
+        try exec_start.appendSlice(allocator, " --zolt");
+        if (opts.zolt_command) |zolt_command| {
+            try appendGatewayServiceArg(allocator, &exec_start, "--zolt-path", zolt_command);
+        }
+    } else if (opts.dispatch) |dispatch| {
+        try appendGatewayServiceArg(allocator, &exec_start, "--dispatch", dispatch);
+    }
+
+    if (opts.auth_token) |auth_token| {
+        try appendGatewayServiceArg(allocator, &exec_start, "--auth-token", auth_token);
+    }
+
+    return std.fmt.allocPrint(
+        allocator,
+        "[Unit]\n" ++
+            "Description=volt gateway service\n" ++
+            "After=network.target\n" ++
+            "\n" ++
+            "[Service]\n" ++
+            "Type=simple\n" ++
+            "ExecStart={s}\n" ++
+            "Restart=always\n" ++
+            "RestartSec=2\n" ++
+            "\n" ++
+            "[Install]\n" ++
+            "WantedBy=default.target\n",
+        .{exec_start.items},
+    );
+}
+
+fn buildGatewayLaunchdPlist(allocator: Allocator, exe_path: []const u8, opts: GatewayRunOptions) ![]u8 {
+    var args = std.ArrayListUnmanaged([]const u8){};
+    defer {
+        for (args.items) |entry| allocator.free(entry);
+        args.deinit(allocator);
+    }
+
+    try args.append(allocator, try allocator.dupe(u8, exe_path));
+    try args.append(allocator, try allocator.dupe(u8, "gateway"));
+    if (opts.home_path) |home_path| {
+        try args.append(allocator, try allocator.dupe(u8, "--home"));
+        try args.append(allocator, try allocator.dupe(u8, home_path));
+    }
+    if (opts.bind.len > 0) {
+        const bind = resolveGatewayBind(opts.bind);
+        try args.append(allocator, try allocator.dupe(u8, "--bind"));
+        try args.append(allocator, try allocator.dupe(u8, bind));
+    }
+    const port = try std.fmt.allocPrint(allocator, "{d}", .{opts.port});
+    defer allocator.free(port);
+    try args.append(allocator, try allocator.dupe(u8, "--port"));
+    try args.append(allocator, try allocator.dupe(u8, port));
+    if (opts.account) |account| {
+        try args.append(allocator, try allocator.dupe(u8, "--account"));
+        try args.append(allocator, try allocator.dupe(u8, account));
+    }
+    if (opts.zolt) {
+        try args.append(allocator, try allocator.dupe(u8, "--zolt"));
+        if (opts.zolt_command) |zolt_command| {
+            try args.append(allocator, try allocator.dupe(u8, "--zolt-path"));
+            try args.append(allocator, try allocator.dupe(u8, zolt_command));
+        }
+    } else if (opts.dispatch) |dispatch| {
+        try args.append(allocator, try allocator.dupe(u8, "--dispatch"));
+        try args.append(allocator, try allocator.dupe(u8, dispatch));
+    }
+    if (opts.auth_token) |auth_token| {
+        try args.append(allocator, try allocator.dupe(u8, "--auth-token"));
+        try args.append(allocator, try allocator.dupe(u8, auth_token));
+    }
+
+    var xml = std.ArrayListUnmanaged(u8){};
+    defer xml.deinit(allocator);
+    try xml.appendSlice(allocator, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+    try xml.appendSlice(allocator, "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n");
+    try xml.appendSlice(allocator, "<plist version=\"1.0\">\n");
+    try xml.appendSlice(allocator, "  <dict>\n");
+    try xml.appendSlice(allocator, "    <key>Label</key>\n");
+    try xml.appendSlice(allocator, "    <string>");
+    try xml.appendSlice(allocator, GatewayLaunchdLabel);
+    try xml.appendSlice(allocator, "</string>\n");
+    try xml.appendSlice(allocator, "    <key>RunAtLoad</key>\n");
+    try xml.appendSlice(allocator, "    <true/>\n");
+    try xml.appendSlice(allocator, "    <key>ProgramArguments</key>\n");
+    try xml.appendSlice(allocator, "    <array>\n");
+    for (args.items) |arg| {
+        try xml.appendSlice(allocator, "      <string>");
+        const escaped = try escapeXmlString(allocator, arg);
+        defer allocator.free(escaped);
+        try xml.appendSlice(allocator, escaped);
+        try xml.appendSlice(allocator, "</string>\n");
+    }
+    try xml.appendSlice(allocator, "    </array>\n");
+    try xml.appendSlice(allocator, "  </dict>\n");
+    try xml.appendSlice(allocator, "</plist>\n");
+
+    return xml.toOwnedSlice(allocator);
+}
+
+fn appendGatewayServiceArg(
+    allocator: Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    name: []const u8,
+    value: ?[]const u8,
+) !void {
+    if (value) |raw| {
+        if (raw.len == 0) return;
+        try out.appendSlice(allocator, " ");
+        const escaped_name = try systemdShellQuote(allocator, name);
+        defer allocator.free(escaped_name);
+        try out.appendSlice(allocator, escaped_name);
+        const escaped_value = try systemdShellQuote(allocator, raw);
+        defer allocator.free(escaped_value);
+        try out.appendSlice(allocator, " ");
+        try out.appendSlice(allocator, escaped_value);
+    }
+}
+
+fn systemdShellQuote(allocator: Allocator, value: []const u8) ![]u8 {
+    var out = std.ArrayListUnmanaged(u8){};
+    defer out.deinit(allocator);
+    try out.append(allocator, '\'');
+    if (value.len == 0) {
+        try out.append(allocator, '\'');
+        return try out.toOwnedSlice(allocator);
+    }
+    for (value) |byte| {
+        if (byte == '\'') {
+            try out.appendSlice(allocator, "'\"'\"'");
+        } else {
+            try out.append(allocator, byte);
+        }
+    }
+    try out.append(allocator, '\'');
+    return out.toOwnedSlice(allocator);
+}
+
+fn escapeXmlString(allocator: Allocator, value: []const u8) ![]u8 {
+    var out = std.ArrayListUnmanaged(u8){};
+    defer out.deinit(allocator);
+    for (value) |byte| {
+        switch (byte) {
+            '&' => try out.appendSlice(allocator, "&amp;"),
+            '<' => try out.appendSlice(allocator, "&lt;"),
+            '>' => try out.appendSlice(allocator, "&gt;"),
+            '"' => try out.appendSlice(allocator, "&quot;"),
+            '\'' => try out.appendSlice(allocator, "&apos;"),
+            else => try out.append(allocator, byte),
+        }
+    }
+    return out.toOwnedSlice(allocator);
 }
 
 fn resolveHomePath(allocator: Allocator, override: ?[]const u8) ![]u8 {
@@ -2313,6 +2724,71 @@ test "parseGatewayOptions supports --zolt and enforces exclusivity" {
         error.UnexpectedArgument,
         parseGatewayOptions(&.{ "--zolt-path", "/usr/local/bin/zolt" }),
     );
+}
+
+test "parseGatewayServiceAction maps command strings" {
+    try testing.expectEqual(GatewayServiceAction.run, parseGatewayServiceAction("gateway"));
+    try testing.expectEqual(GatewayServiceAction.install, parseGatewayServiceAction("install"));
+    try testing.expectEqual(GatewayServiceAction.uninstall, parseGatewayServiceAction("uninstall"));
+    try testing.expectEqual(GatewayServiceAction.start, parseGatewayServiceAction("start"));
+    try testing.expectEqual(GatewayServiceAction.stop, parseGatewayServiceAction("stop"));
+    try testing.expectEqual(GatewayServiceAction.restart, parseGatewayServiceAction("restart"));
+    try testing.expectEqual(GatewayServiceAction.status, parseGatewayServiceAction("status"));
+}
+
+test "buildGatewaySystemdUnit builds launch command and service header" {
+    const allocator = testing.allocator;
+    const opts = try parseGatewayOptions(&.{
+        "--home",
+        "/tmp/volt",
+        "--bind",
+        "127.0.0.1",
+        "--port",
+        "18889",
+        "--account",
+        "team",
+        "--auth-token",
+        "token-123",
+    });
+
+    const unit = try buildGatewaySystemdUnit(allocator, "/usr/local/bin/volt", opts);
+    defer allocator.free(unit);
+
+    try testing.expect(std.mem.indexOf(u8, unit, "[Unit]") != null);
+    try testing.expect(std.mem.indexOf(u8, unit, "[Service]") != null);
+    try testing.expect(std.mem.indexOf(u8, unit, "Type=simple") != null);
+    try testing.expect(std.mem.indexOf(u8, unit, "Restart=always") != null);
+    try testing.expect(std.mem.indexOf(u8, unit, "WantedBy=default.target") != null);
+    try testing.expect(std.mem.indexOf(u8, unit, "ExecStart=") != null);
+    try testing.expect(std.mem.indexOf(u8, unit, "'--home'") != null);
+    try testing.expect(std.mem.indexOf(u8, unit, "'/usr/local/bin/volt' gateway") != null);
+    try testing.expect(std.mem.indexOf(u8, unit, "'--bind' '127.0.0.1'") != null);
+    try testing.expect(std.mem.indexOf(u8, unit, "'--port' '18889'") != null);
+    try testing.expect(std.mem.indexOf(u8, unit, "WorkingDirectory=") == null);
+}
+
+test "buildGatewayLaunchdPlist includes configured arguments" {
+    const allocator = testing.allocator;
+    const opts = try parseGatewayOptions(&.{
+        "--home",
+        "/tmp/volt",
+        "--bind",
+        "localhost",
+        "--port",
+        "18889",
+        "--zolt",
+    });
+
+    const plist = try buildGatewayLaunchdPlist(allocator, "/usr/local/bin/volt", opts);
+    defer allocator.free(plist);
+
+    try testing.expect(std.mem.indexOf(u8, plist, "<key>Label</key>") != null);
+    try testing.expect(std.mem.indexOf(u8, plist, "<string>com.volt.gateway</string>") != null);
+    try testing.expect(std.mem.indexOf(u8, plist, "<key>ProgramArguments</key>") != null);
+    try testing.expect(std.mem.indexOf(u8, plist, "<string>gateway</string>") != null);
+    try testing.expect(std.mem.indexOf(u8, plist, "<string>--home</string>") != null);
+    try testing.expect(std.mem.indexOf(u8, plist, "<string>/tmp/volt</string>") != null);
+    try testing.expect(std.mem.indexOf(u8, plist, "<string>--zolt</string>") != null);
 }
 
 test "parseGatewayRoute recognizes supported paths" {

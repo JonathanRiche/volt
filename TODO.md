@@ -26,6 +26,9 @@
   - supports default dispatch via `--zolt` and `--dispatch`.
   - supports token auth resolution (`--auth-token`, env, config).
   - includes parser and route/payload tests.
+- Gateway service process control:
+  - `volt gateway install|start|stop|restart|status|uninstall` implemented.
+  - Linux and macOS service definitions are generated and executed via system service tools.
 - Initial compatibility docs (`README.md`, `USAGE.md`), tests for parser/dispatch helpers.
 
 ## Reference parity gaps to implement
@@ -39,7 +42,7 @@ The original reference has a much broader surface. The items below are not yet i
     `models`, `nodes/devices/browser/cron/webhooks/hardware tools`, `skills`,
     `acp`, `tui`, and `voicecall`.
 - Runtime model:
-  - No background Gateway service/process control.
+  - Service tests still lack integration coverage against real service managers.
   - No device/channel/node orchestration loop.
   - No session daemoning / remote WS protocol.
 - Channel coverage:

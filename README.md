@@ -54,6 +54,26 @@ curl -H "Authorization: Bearer volt-gateway-token" \
   -H "Content-Type: application/json" \
   -d '{"message":"hello","chat_id":123}' \
   http://127.0.0.1:18789/invoke
+
+### Gateway service commands
+
+Volt can manage the gateway as a background service:
+
+```bash
+volt gateway install [--home <path>] [--bind <ip>] [--port <port>] [--account <id>] [--dispatch <command>] [--zolt] [--zolt-path <path>] [--auth-token <token>]
+volt gateway start|stop|restart|status|uninstall [--home <path>] [--bind <ip>] [--port <port>] [--account <id>] [--dispatch <command>] [--zolt] [--zolt-path <path>] [--auth-token <token>]
+```
+
+Commands:
+
+- `install`: writes the OS service definition and starts the gateway.
+- `start`: starts an installed service.
+- `stop`: stops a running service.
+- `restart`: restarts a service.
+- `status`: prints current service status using the native OS service manager.
+- `uninstall`: stops and removes the service definition.
+
+This currently integrates with `systemd` (Linux) and `launchd` (macOS).
 ```
 
 ## Documentation
