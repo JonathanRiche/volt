@@ -54,6 +54,15 @@ curl -H "Authorization: Bearer volt-gateway-token" \
   -H "Content-Type: application/json" \
   -d '{"message":"hello","chat_id":123}' \
   http://127.0.0.1:18789/invoke
+```
+
+With `--zolt`, Volt executes `zolt --session <session_key> --message <message>`.
+
+Gateway session IDs are resolved as:
+
+- explicit `session` in JSON payload
+- else `gateway:<account>:<chat_id>` when `chat_id` is present
+- else `gateway:<account>`
 
 ### Gateway service commands
 

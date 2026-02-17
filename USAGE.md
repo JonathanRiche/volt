@@ -59,9 +59,29 @@ Available placeholders in `--dispatch` values:
 - `{message}` / `{text}`: incoming Telegram message text
 - `{chat_id}`: Telegram chat id
 - `{account}`: normalized account id
-- `{session}`: derived `telegram:<account>:<chat_id>` session key
+- `{session}`: derived session key (in priority order):
+  - explicit `session` from request payload, else
+  - `gateway:<account>:<chat_id>` if `chat_id` is provided, else
+  - `gateway:<account>`
 
 If `{message}`/`{text}` is not present, Volt appends the message text as the final argv entry.
+
+Example gateway↔zolt call flow:
+
+```bash
+curl -H "Authorization: Bearer volt-gateway-token" \
+  -H "Content-Type: application/json" \
+  -d '{"message":"ping","chat_id":123,"account":"work","session":"gateway:work:123"}' \
+  http://127.0.0.1:18789/invoke
+```
+
+With `--zolt`, this produces the command:
+
+```bash
+zolt --session gateway:work:123 --message ping
+```
+
+If `session` is omitted, Volt will generate `gateway:work:123` from the account and chat_id.
 
 If `--token` is omitted, token resolution is:
 
