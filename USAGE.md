@@ -2,6 +2,23 @@
 
 ## Commands
 
+### Install
+
+```bash
+mkdir -p "$HOME/.local/bin"
+zig build install -Doptimize=ReleaseFast --prefix "$HOME/.local"
+```
+
+This installs the executable as `volt` (for example at `~/.local/bin/volt`).
+
+To bundle a local `zolt` checkout/dependency at install time:
+
+```bash
+zig build install -Dwith-zolt=true -Doptimize=ReleaseFast --prefix "$HOME/.local"
+```
+
+Ensure `~/.local/bin` is on your `PATH`.
+
 ### `volt init`
 
 Create the Volt workspace under `~/.volt` by default (or `--home`).

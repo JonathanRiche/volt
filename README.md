@@ -15,6 +15,25 @@ Run the CLI:
 zig build run -- --help
 ```
 
+Install release binary as `volt`:
+
+```bash
+mkdir -p "$HOME/.local/bin"
+zig build install -Doptimize=ReleaseFast --prefix "$HOME/.local"
+```
+
+Then run:
+
+```bash
+volt --help
+```
+
+Bundle `zolt` during install if you want Volt to ship its own dispatch dependency:
+
+```bash
+zig build install -Dwith-zolt=true -Doptimize=ReleaseFast --prefix "$HOME/.local"
+```
+
 By default, Volt uses `~/.volt` as the workspace root (or `--home`).
 
 Initialize workspace layout with:

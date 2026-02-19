@@ -375,13 +375,14 @@ fn runGateway(allocator: Allocator, opts: GatewayRunOptions) !void {
     defer deinitDispatchPlan(allocator, dispatch);
 
     const bind = resolveGatewayBind(opts.bind);
-    const listener = try std.net.Address.parseIp(bind, opts.port).listen(.{
+    const address = try std.net.Address.parseIp(bind, opts.port);
+    var listener = try address.listen(.{
         .reuse_address = true,
         .kernel_backlog = 128,
     });
     defer listener.deinit();
 
-    try std.io.getStdErr().writer().print(
+    try std.fs.File.stderr().deprecatedWriter().print(
         "volt: gateway listening on http://{s}:{d}\n",
         .{ bind, opts.port },
     );
@@ -421,17 +422,17 @@ fn runGatewayConnection(
     var write_buffer: [4096]u8 = undefined;
     var req_reader = connection.stream.reader(&read_buffer);
     var req_writer = connection.stream.writer(&write_buffer);
-    var server = std.http.Server.init(&req_reader.interface, &req_writer.interface);
+    var server = std.http.Server.init(req_reader.interface(), &req_writer.interface);
 
     while (true) {
-        const request = server.receiveHead() catch |err| return switch (err) {
+        var request = server.receiveHead() catch |err| return switch (err) {
             error.HttpConnectionClosing => return,
             else => err,
         };
 
         try serveGatewayRequest(
             allocator,
-            request,
+            &request,
             ctx,
         );
 
@@ -441,7 +442,7 @@ fn runGatewayConnection(
 
 fn serveGatewayRequest(
     allocator: Allocator,
-    request: std.http.Server.Request,
+    request: *std.http.Server.Request,
     ctx: *const GatewayRequestContext,
 ) !void {
     const route = parseGatewayRoute(request.head.target);
@@ -556,7 +557,7 @@ fn serveGatewayRequest(
 
 fn handleGatewayInvoke(
     allocator: Allocator,
-    request: std.http.Server.Request,
+    request: *std.http.Server.Request,
     ctx: *const GatewayRequestContext,
 ) ![]u8 {
     const body = try readGatewayBody(allocator, request);
@@ -605,7 +606,7 @@ fn parseGatewayRoute(target: []const u8) GatewayRoute {
 
 fn respondGatewayJson(
     allocator: Allocator,
-    request: std.http.Server.Request,
+    request: *std.http.Server.Request,
     status: std.http.Status,
     payload: anytype,
 ) !void {
@@ -621,7 +622,7 @@ fn respondGatewayJson(
     try request.respond(body, .{ .status = status, .extra_headers = &headers });
 }
 
-fn readGatewayBody(allocator: Allocator, request: std.http.Server.Request) ![]u8 {
+fn readGatewayBody(allocator: Allocator, request: *std.http.Server.Request) ![]u8 {
     if (request.head.content_length == null and request.head.transfer_encoding == .none) {
         return try allocator.dupe(u8, "");
     }
@@ -631,9 +632,24 @@ fn readGatewayBody(allocator: Allocator, request: std.http.Server.Request) ![]u8
         return error.GatewayBadRequest;
     }
 
+    if (content_length == 0) {
+        return try allocator.dupe(u8, "");
+    }
+
     var body_buffer: [4096]u8 = undefined;
     const body_reader = request.readerExpectNone(&body_buffer);
-    return body_reader.readAllAlloc(allocator, MaxGatewayRequestSize);
+    var body = try allocator.alloc(u8, content_length);
+    errdefer allocator.free(body);
+
+    var body_len: usize = 0;
+    while (body_len < content_length) {
+        const chunk = body[body_len..];
+        const read = body_reader.readSliceShort(chunk) catch return error.GatewayBadRequest;
+        if (read == 0) break;
+        body_len += read;
+    }
+
+    return body[0..body_len];
 }
 
 fn parseGatewayInvokePayload(allocator: Allocator, body: []const u8) !std.json.Parsed(GatewayInvokePayload) {
@@ -646,7 +662,7 @@ fn parseGatewayInvokePayload(allocator: Allocator, body: []const u8) !std.json.P
     ) catch error.GatewayBadRequest;
 }
 
-fn isGatewayAuthorized(request: std.http.Server.Request, token: []const u8) bool {
+fn isGatewayAuthorized(request: *std.http.Server.Request, token: []const u8) bool {
     if (token.len == 0) return true;
 
     var headers = request.iterateHeaders();
@@ -1290,26 +1306,26 @@ fn runGatewayServiceLinux(allocator: Allocator, action: GatewayServiceAction, op
             try runGatewayCommand(allocator, &.{ "systemctl", "--user", "daemon-reload" }, false);
             try runGatewayCommand(allocator, &.{ "systemctl", "--user", "enable", GatewaySystemdUnit }, false);
             try runGatewayCommand(allocator, &.{ "systemctl", "--user", "start", GatewaySystemdUnit }, false);
-            try std.io.getStdErr().writer().print("volt: installed gateway service: {s}\n", .{GatewaySystemdUnit});
+            try std.fs.File.stderr().deprecatedWriter().print("volt: installed gateway service: {s}\n", .{GatewaySystemdUnit});
         },
         .uninstall => {
             try runGatewayCommandOrWarn(allocator, &.{ "systemctl", "--user", "stop", GatewaySystemdUnit });
             try runGatewayCommandOrWarn(allocator, &.{ "systemctl", "--user", "disable", GatewaySystemdUnit });
             if (std.fs.cwd().deleteFile(unit_path)) |_| {} else |err| if (err != error.FileNotFound) return err;
             try runGatewayCommand(allocator, &.{ "systemctl", "--user", "daemon-reload" }, false);
-            try std.io.getStdErr().writer().print("volt: uninstalled gateway service: {s}\n", .{GatewaySystemdUnit});
+            try std.fs.File.stderr().deprecatedWriter().print("volt: uninstalled gateway service: {s}\n", .{GatewaySystemdUnit});
         },
         .start => {
             try runGatewayCommand(allocator, &.{ "systemctl", "--user", "start", GatewaySystemdUnit }, false);
-            try std.io.getStdErr().writer().print("volt: started gateway service\n", .{});
+            try std.fs.File.stderr().deprecatedWriter().print("volt: started gateway service\n", .{});
         },
         .stop => {
             try runGatewayCommand(allocator, &.{ "systemctl", "--user", "stop", GatewaySystemdUnit }, true);
-            try std.io.getStdErr().writer().print("volt: stopped gateway service\n", .{});
+            try std.fs.File.stderr().deprecatedWriter().print("volt: stopped gateway service\n", .{});
         },
         .restart => {
             try runGatewayCommand(allocator, &.{ "systemctl", "--user", "restart", GatewaySystemdUnit }, true);
-            try std.io.getStdErr().writer().print("volt: restarted gateway service\n", .{});
+            try std.fs.File.stderr().deprecatedWriter().print("volt: restarted gateway service\n", .{});
         },
         .status => {
             var status = std.ArrayListUnmanaged(u8){};
@@ -1324,7 +1340,7 @@ fn runGatewayServiceLinux(allocator: Allocator, action: GatewayServiceAction, op
                 true,
             );
 
-            std.io.getStdErr().writer().print("volt: gateway service status: {s}\n", .{status.items}) catch {};
+            std.fs.File.stderr().deprecatedWriter().print("volt: gateway service status: {s}\n", .{status.items}) catch {};
         },
         .run => return,
     }
@@ -1349,25 +1365,25 @@ fn runGatewayServiceMacos(allocator: Allocator, action: GatewayServiceAction, op
             defer allocator.free(plist);
             try writeTextFile(plist_path, plist, true);
             try runGatewayCommand(allocator, &.{ "launchctl", "bootstrap", gui_scope, plist_path }, false);
-            try std.io.getStdErr().writer().print("volt: installed gateway service: {s}\n", .{service_label});
+            try std.fs.File.stderr().deprecatedWriter().print("volt: installed gateway service: {s}\n", .{service_label});
         },
         .uninstall => {
             try runGatewayCommand(allocator, &.{ "launchctl", "bootout", gui_scope, plist_path }, true);
             if (std.fs.cwd().deleteFile(plist_path)) |_| {} else |err| if (err != error.FileNotFound) return err;
-            try std.io.getStdErr().writer().print("volt: uninstalled gateway service: {s}\n", .{service_label});
+            try std.fs.File.stderr().deprecatedWriter().print("volt: uninstalled gateway service: {s}\n", .{service_label});
         },
         .start => {
             try runGatewayCommand(allocator, &.{ "launchctl", "bootstrap", gui_scope, plist_path }, false);
-            try std.io.getStdErr().writer().print("volt: started gateway service\n", .{});
+            try std.fs.File.stderr().deprecatedWriter().print("volt: started gateway service\n", .{});
         },
         .stop => {
             try runGatewayCommandOrWarn(allocator, &.{ "launchctl", "bootout", gui_scope, launchd_service });
-            try std.io.getStdErr().writer().print("volt: stopped gateway service\n", .{});
+            try std.fs.File.stderr().deprecatedWriter().print("volt: stopped gateway service\n", .{});
         },
         .restart => {
             try runGatewayCommandOrWarn(allocator, &.{ "launchctl", "bootout", gui_scope, launchd_service });
             try runGatewayCommand(allocator, &.{ "launchctl", "bootstrap", gui_scope, plist_path }, false);
-            try std.io.getStdErr().writer().print("volt: restarted gateway service\n", .{});
+            try std.fs.File.stderr().deprecatedWriter().print("volt: restarted gateway service\n", .{});
         },
         .status => {
             var status = std.ArrayListUnmanaged(u8){};
@@ -1379,7 +1395,7 @@ fn runGatewayServiceMacos(allocator: Allocator, action: GatewayServiceAction, op
                 &status,
                 true,
             );
-            try std.io.getStdErr().writer().print("volt: gateway service status:\n{s}\n", .{status.items});
+            try std.fs.File.stderr().deprecatedWriter().print("volt: gateway service status:\n{s}\n", .{status.items});
         },
         .run => return,
     }
@@ -1412,12 +1428,12 @@ fn runGatewayCommandWithOutput(
         .Exited => |code| {
             if (!tolerate_failure and code != 0) {
                 if (cmd.stderr.len > 0) {
-                    try std.io.getStdErr().writer().print(
+                    try std.fs.File.stderr().deprecatedWriter().print(
                         "volt: command failed: {s}\n",
                         .{cmd.stderr},
                     );
                 } else if (cmd.stdout.len > 0) {
-                    try std.io.getStdErr().writer().print(
+                    try std.fs.File.stderr().deprecatedWriter().print(
                         "volt: command failed: {s}\n",
                         .{cmd.stdout},
                     );
@@ -2520,12 +2536,7 @@ fn resolveGatewayAuthToken(
         if (err != error.EnvironmentVariableNotFound) return err;
     }
 
-    const path = resolveConfigPath(allocator, root) catch |err| {
-        return switch (err) {
-            error.FileNotFound => allocator.dupe(u8, DefaultGatewayToken),
-            else => return err,
-        };
-    };
+    const path = resolveConfigPath(allocator, root) catch return allocator.dupe(u8, DefaultGatewayToken);
     defer allocator.free(path);
 
     const data = readFileAlloc(allocator, path) catch |err| {
