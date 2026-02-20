@@ -2227,39 +2227,37 @@ fn composeChildOutput(
         total_len += "[stderr]\n".len;
         total_len += stderr.len;
     }
+    if (footer_text != null) {
+        total_len += if (has_body) 1 else 0;
+    }
     if (footer_text) |text| {
-        if (has_body) total_len += 1;
         total_len += text.len;
     }
 
     var out = try allocator.alloc(u8, total_len);
-    var cursor: usize = 0;
+    var stream = std.io.fixedBufferStream(out);
+    var writer = stream.writer();
+
     if (stdout.len > 0) {
-        std.mem.copyForwards(u8, out[cursor .. cursor + stdout.len], stdout);
-        cursor += stdout.len;
+        try writer.writeAll(stdout);
     }
 
     if (stderr.len > 0) {
         if (stdout.len > 0) {
-            out[cursor] = '\n';
-            cursor += 1;
+            try writer.writeByte('\n');
         }
-        std.mem.copyForwards(u8, out[cursor .. cursor + "[stderr]\n".len], "[stderr]\n");
-        cursor += "[stderr]\n".len;
-        std.mem.copyForwards(u8, out[cursor .. cursor + stderr.len], stderr);
-        cursor += stderr.len;
+        try writer.writeAll("[stderr]\n");
+        try writer.writeAll(stderr);
     }
 
     if (footer_text) |text| {
         if (has_body) {
-            out[cursor] = '\n';
-            cursor += 1;
+            try writer.writeByte('\n');
         }
-        std.mem.copyForwards(u8, out[cursor .. cursor + text.len], text);
-        cursor += text.len;
+        try writer.writeAll(text);
     }
 
-    return out;
+    return out[0..stream.pos];
 }
 
 fn fetchUpdates(
