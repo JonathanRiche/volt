@@ -184,6 +184,7 @@ const TelegramZoltSessionMap = struct {
 const ZoltRunOutput = struct {
     session_id: []const u8,
     response: []const u8,
+    final_response: []const u8,
 };
 
 const DispatchMode = enum { shell, argv };
@@ -2558,14 +2559,15 @@ fn runTelegramThroughZolt(
                 const mapped_parsed = parseZoltRunJson(allocator, mapped_output) catch null;
                 if (mapped_parsed) |parsed| {
                     defer deinitZoltRunOutput(allocator, parsed);
-                    if (parsed.response.len > 0) {
+                    if (parsed.response.len > 0 or parsed.final_response.len > 0) {
+                        const reply = try hydrateZoltDisplayText(allocator, parsed);
                         allocator.free(mapped_output);
                         if (parsed.session_id.len > 0 and
                             !std.mem.eql(u8, parsed.session_id, mapped_session))
                         {
                             try persistTelegramZoltSessionId(allocator, root, session_key, parsed.session_id);
                         }
-                        return try allocator.dupe(u8, parsed.response);
+                        return reply;
                     }
                 }
             }
@@ -2608,12 +2610,44 @@ fn runTelegramThroughZolt(
     }
 
     try persistTelegramZoltSessionId(allocator, root, session_key, parsed.session_id);
-    return try allocator.dupe(u8, parsed.response);
+    return try hydrateZoltDisplayText(allocator, parsed);
 }
 
 fn deinitZoltRunOutput(allocator: Allocator, output: ZoltRunOutput) void {
     allocator.free(output.session_id);
     allocator.free(output.response);
+    allocator.free(output.final_response);
+}
+
+fn hydrateZoltDisplayText(allocator: Allocator, output: ZoltRunOutput) ![]u8 {
+    if (isToolPayloadResponse(allocator, output.response) and output.final_response.len > 0) {
+        return try allocator.dupe(u8, output.final_response);
+    }
+    if (isToolPayloadResponse(allocator, output.response)) {
+        return try allocator.dupe(u8, "I am unable to return a user-facing response for this tool call yet.");
+    }
+    return try allocator.dupe(u8, output.response);
+}
+
+fn isToolPayloadResponse(allocator: Allocator, response: []const u8) bool {
+    const trimmed = std.mem.trim(u8, response, " \t\r\n");
+    if (trimmed.len == 0 or !std.mem.startsWith(u8, trimmed, "{")) {
+        return false;
+    }
+
+    const parsed = std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        trimmed,
+        .{},
+    ) catch return false;
+    defer parsed.deinit();
+
+    const root = &parsed.value;
+    if (resolveJsonValue(root, &.{"cmd"}) != null) return true;
+    if (resolveJsonValue(root, &.{"command"}) != null) return true;
+    if (resolveJsonValue(root, &.{"yield_ms"}) != null) return true;
+    return false;
 }
 
 fn parseZoltRunJson(allocator: Allocator, text: []const u8) !ZoltRunOutput {
@@ -2634,11 +2668,28 @@ fn parseZoltRunJson(allocator: Allocator, text: []const u8) !ZoltRunOutput {
     const response = if (resolveJsonStringField(root, &.{"response"})) |raw| blk: {
         break :blk try allocator.dupe(u8, raw);
     } else try allocator.dupe(u8, "");
+    const final_response = try extractZoltRunFinalResponse(allocator, root);
 
     return ZoltRunOutput{
         .session_id = session_id,
         .response = response,
+        .final_response = final_response,
     };
+}
+
+fn extractZoltRunFinalResponse(allocator: Allocator, root: *const std.json.Value) ![]u8 {
+    const events = resolveJsonValue(root, &.{"events"}) orelse return try allocator.dupe(u8, "");
+    if (events.* != .array) return try allocator.dupe(u8, "");
+
+    for (events.array.items) |event| {
+        if (resolveJsonStringField(&event, &.{"type"})) |event_type| {
+            if (!std.mem.eql(u8, event_type, "final")) continue;
+            if (resolveJsonStringField(&event, &.{"text"})) |text| {
+                return try allocator.dupe(u8, text);
+            }
+        }
+    }
+    return try allocator.dupe(u8, "");
 }
 
 fn extractJsonObject(text: []const u8) ?[]const u8 {
@@ -4232,6 +4283,51 @@ test "parseZoltRunJson handles missing fields" {
 
     try testing.expectEqualStrings("", parsed.session_id);
     try testing.expectEqualStrings("", parsed.response);
+}
+
+test "parseZoltRunJson prefers final token event text" {
+    const allocator = testing.allocator;
+    const payload =
+        "{\"session_id\":\"sess_123\",\"response\":\"{\\\"cmd\\\":\\\"date +%F\\\",\\\"yield_ms\\\":700}\",\"events\":[{\"type\":\"final\",\"text\":\"2026-02-20\"}]}";
+
+    const parsed = try parseZoltRunJson(allocator, payload);
+    defer deinitZoltRunOutput(allocator, parsed);
+
+    try testing.expectEqualStrings("sess_123", parsed.session_id);
+    try testing.expectEqualStrings("{\"cmd\":\"date +%F\",\"yield_ms\":700}", parsed.response);
+    try testing.expectEqualStrings("2026-02-20", parsed.final_response);
+}
+
+test "hydrateZoltDisplayText uses final text for tool payload responses" {
+    const allocator = testing.allocator;
+
+    const parsed = ZoltRunOutput{
+        .session_id = try allocator.dupe(u8, "sess_456"),
+        .response = try allocator.dupe(u8, "{\"cmd\":\"date +%F\",\"yield_ms\":700}"),
+        .final_response = try allocator.dupe(u8, "2026-02-20"),
+    };
+    defer deinitZoltRunOutput(allocator, parsed);
+
+    const hydrated = try hydrateZoltDisplayText(allocator, parsed);
+    defer allocator.free(hydrated);
+
+    try testing.expectEqualStrings("2026-02-20", hydrated);
+}
+
+test "hydrateZoltDisplayText hides unsupported tool payload responses" {
+    const allocator = testing.allocator;
+
+    const parsed = ZoltRunOutput{
+        .session_id = try allocator.dupe(u8, "sess_789"),
+        .response = try allocator.dupe(u8, "{\"cmd\":\"date +%F\",\"yield_ms\":700}"),
+        .final_response = try allocator.dupe(u8, ""),
+    };
+    defer deinitZoltRunOutput(allocator, parsed);
+
+    const hydrated = try hydrateZoltDisplayText(allocator, parsed);
+    defer allocator.free(hydrated);
+
+    try testing.expect(std.mem.indexOf(u8, hydrated, "unable to") != null);
 }
 
 test "parseZoltRunJson ignores stderr noise around json payload" {
