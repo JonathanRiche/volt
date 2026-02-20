@@ -83,7 +83,8 @@ On a first message for a chat, Volt bootstraps a fresh zolt session by prependin
 - session/state file locations
 - markdown guidance files in `.volt`.
 
-Volt sends responses as MarkdownV2 when it detects markdown structure (lists, headings, inline code, fences, links), and falls back to plain text if Telegram rejects the formatted payload.
+Volt sends responses as Markdown when it detects markdown structure (lists, headings, inline code, fences, links), and falls back to plain text if Telegram rejects the formatted payload.
+Telegram image attachments are downloaded into `<home>/telegram/media/<account>/<chat_id>/` and injected into zolt prompts as `@path` references.
 
 Slash commands are available in Telegram and are registered as command menu entries:
 

@@ -218,6 +218,18 @@ const TelegramChat = struct {
 const TelegramMessage = struct {
     chat: ?TelegramChat = null,
     text: ?[]const u8 = null,
+    caption: ?[]const u8 = null,
+    photo: []const TelegramPhotoSize = &.{},
+    document: ?TelegramDocument = null,
+};
+
+const TelegramPhotoSize = struct {
+    file_id: []const u8 = "",
+};
+
+const TelegramDocument = struct {
+    file_id: []const u8 = "",
+    mime_type: ?[]const u8 = null,
 };
 
 const TelegramUpdate = struct {
@@ -233,6 +245,15 @@ const TelegramUpdates = struct {
 const TelegramCommandsResponse = struct {
     ok: bool = false,
     description: ?[]const u8 = null,
+};
+
+const TelegramGetFileResponse = struct {
+    ok: bool = false,
+    result: ?TelegramFileResult = null,
+};
+
+const TelegramFileResult = struct {
+    file_path: ?[]const u8 = null,
 };
 
 const TelegramUpdatesEnvelope = struct {
@@ -255,6 +276,7 @@ const DefaultGatewayBind = "127.0.0.1";
 const TelegramMarkdownParseMode = "Markdown";
 const TelegramChatActionTyping = "typing";
 const TelegramTypingPulseMs = 4000;
+const TelegramMaxImageBytes: usize = 20 * 1024 * 1024;
 
 const VoltBootstrapTemplateFile = struct {
     relative_path: []const u8,
@@ -1152,10 +1174,33 @@ fn runTelegramGateway(allocator: Allocator, opts: TelegramRunOptions) !void {
 
         var next_offset = current_offset;
         for (updates.parsed.value.result) |update| {
+            next_offset = @max(next_offset, update.update_id + 1);
             if (update.message) |message| {
                 const chat = message.chat orelse continue;
-                const text = message.text orelse continue;
                 if (!chatAllowed(allow_list, chat.id)) continue;
+
+                const command_source = std.mem.trim(
+                    u8,
+                    message.text orelse message.caption orelse "",
+                    " \t\r\n",
+                );
+                const text = buildTelegramPromptMessage(
+                    allocator,
+                    &client,
+                    token,
+                    root,
+                    account,
+                    update.update_id,
+                    chat.id,
+                    message,
+                ) catch |err| {
+                    const error_msg = try std.fmt.allocPrint(allocator, "failed to process message: {s}", .{@errorName(err)});
+                    defer allocator.free(error_msg);
+                    try sendTelegramMessage(allocator, &client, token, chat.id, error_msg);
+                    continue;
+                };
+                defer allocator.free(text);
+                if (text.len == 0) continue;
 
                 const session_key = try std.fmt.allocPrint(allocator, "telegram:{s}:{d}", .{ account, chat.id });
                 defer allocator.free(session_key);
@@ -1167,7 +1212,7 @@ fn runTelegramGateway(allocator: Allocator, opts: TelegramRunOptions) !void {
                     .session_key = session_key,
                 };
 
-                const output = if (extractTelegramSlashCommand(text)) |command| out: {
+                const output = if (extractTelegramSlashCommand(command_source)) |command| out: {
                     const result = runWithTypingPulse(
                         token,
                         chat.id,
@@ -1177,7 +1222,6 @@ fn runTelegramGateway(allocator: Allocator, opts: TelegramRunOptions) !void {
                         const error_msg = try std.fmt.allocPrint(allocator, "command failed: {s}", .{@errorName(err)});
                         defer allocator.free(error_msg);
                         try sendTelegramMessage(allocator, &client, token, chat.id, error_msg);
-                        next_offset = @max(next_offset, update.update_id + 1);
                         continue;
                     };
                     break :out result;
@@ -1191,7 +1235,6 @@ fn runTelegramGateway(allocator: Allocator, opts: TelegramRunOptions) !void {
                         const error_msg = try std.fmt.allocPrint(allocator, "command failed: {s}", .{@errorName(err)});
                         defer allocator.free(error_msg);
                         try sendTelegramMessage(allocator, &client, token, chat.id, error_msg);
-                        next_offset = @max(next_offset, update.update_id + 1);
                         continue;
                     };
                     break :out result;
@@ -1205,7 +1248,6 @@ fn runTelegramGateway(allocator: Allocator, opts: TelegramRunOptions) !void {
                         const error_msg = try std.fmt.allocPrint(allocator, "command failed: {s}", .{@errorName(err)});
                         defer allocator.free(error_msg);
                         try sendTelegramMessage(allocator, &client, token, chat.id, error_msg);
-                        next_offset = @max(next_offset, update.update_id + 1);
                         continue;
                     };
                     break :out result;
@@ -1216,8 +1258,6 @@ fn runTelegramGateway(allocator: Allocator, opts: TelegramRunOptions) !void {
                 const response_text = if (output.len == 0) "(no output)" else output;
                 const clipped = if (response_text.len > 3800) response_text[0..3800] else response_text;
                 try sendTelegramMessage(allocator, &client, token, chat.id, clipped);
-
-                next_offset = @max(next_offset, update.update_id + 1);
             }
         }
 
@@ -1229,6 +1269,269 @@ fn runTelegramGateway(allocator: Allocator, opts: TelegramRunOptions) !void {
 
         std.Thread.sleep(clampPollInterval(opts.poll_ms) * std.time.ns_per_ms);
     }
+}
+
+fn buildTelegramPromptMessage(
+    allocator: Allocator,
+    client: *std.http.Client,
+    token: []const u8,
+    root: []const u8,
+    account: []const u8,
+    update_id: i64,
+    chat_id: i64,
+    message: TelegramMessage,
+) ![]u8 {
+    const base_text = std.mem.trim(
+        u8,
+        message.text orelse message.caption orelse "",
+        " \t\r\n",
+    );
+    const image_path = try maybeDownloadTelegramMessageImage(
+        allocator,
+        client,
+        token,
+        root,
+        account,
+        update_id,
+        chat_id,
+        message,
+    );
+    defer if (image_path) |path| allocator.free(path);
+
+    return composeTelegramPromptWithImage(allocator, base_text, image_path);
+}
+
+fn composeTelegramPromptWithImage(
+    allocator: Allocator,
+    text: []const u8,
+    image_path: ?[]const u8,
+) ![]u8 {
+    if (image_path) |path| {
+        const at_ref = try buildTelegramAtPathReference(allocator, path);
+        defer allocator.free(at_ref);
+
+        if (text.len == 0) {
+            return std.fmt.allocPrint(
+                allocator,
+                "Please analyze this attached image.\n{s}",
+                .{at_ref},
+            );
+        }
+
+        return std.fmt.allocPrint(allocator, "{s}\n{s}", .{ text, at_ref });
+    }
+
+    return allocator.dupe(u8, text);
+}
+
+fn buildTelegramAtPathReference(allocator: Allocator, path: []const u8) ![]u8 {
+    if (std.mem.indexOfScalar(u8, path, '"') != null) {
+        return std.fmt.allocPrint(allocator, "@{s}", .{path});
+    }
+    return std.fmt.allocPrint(allocator, "@\"{s}\"", .{path});
+}
+
+fn maybeDownloadTelegramMessageImage(
+    allocator: Allocator,
+    client: *std.http.Client,
+    token: []const u8,
+    root: []const u8,
+    account: []const u8,
+    update_id: i64,
+    chat_id: i64,
+    message: TelegramMessage,
+) !?[]u8 {
+    const file_id = resolveTelegramImageFileId(message) orelse return null;
+
+    const remote_path = try fetchTelegramRemoteFilePath(
+        allocator,
+        client,
+        token,
+        file_id,
+    );
+    defer allocator.free(remote_path);
+
+    const bytes = try downloadTelegramRemoteFileBytes(
+        allocator,
+        client,
+        token,
+        remote_path,
+    );
+    defer allocator.free(bytes);
+
+    if (bytes.len > TelegramMaxImageBytes) {
+        return error.TelegramImageTooLarge;
+    }
+
+    const persisted = try persistTelegramImageAttachment(
+        allocator,
+        root,
+        account,
+        chat_id,
+        update_id,
+        remote_path,
+        bytes,
+    );
+    return persisted;
+}
+
+fn resolveTelegramImageFileId(message: TelegramMessage) ?[]const u8 {
+    if (message.photo.len > 0) {
+        var index = message.photo.len;
+        while (index > 0) {
+            index -= 1;
+            const item = message.photo[index];
+            if (item.file_id.len > 0) return item.file_id;
+        }
+    }
+
+    if (message.document) |doc| {
+        if (doc.file_id.len == 0) return null;
+        if (!isTelegramImageMimeType(doc.mime_type)) return null;
+        return doc.file_id;
+    }
+
+    return null;
+}
+
+fn isTelegramImageMimeType(mime_type: ?[]const u8) bool {
+    const mime = mime_type orelse return false;
+    return std.mem.startsWith(u8, mime, "image/");
+}
+
+fn fetchTelegramRemoteFilePath(
+    allocator: Allocator,
+    client: *std.http.Client,
+    token: []const u8,
+    file_id: []const u8,
+) ![]u8 {
+    var url_buf: [768]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "https://api.telegram.org/bot{s}/getFile", .{token});
+
+    var payload_writer = std.Io.Writer.Allocating.init(allocator);
+    defer payload_writer.deinit();
+    {
+        var stringify = std.json.Stringify{ .writer = &payload_writer.writer, .options = .{} };
+        try stringify.write(.{ .file_id = file_id });
+    }
+    const payload = try payload_writer.toOwnedSlice();
+    defer allocator.free(payload);
+
+    var response_writer = std.Io.Writer.Allocating.init(allocator);
+    defer response_writer.deinit();
+
+    const result = try client.fetch(.{
+        .location = .{ .url = url },
+        .method = .POST,
+        .payload = payload,
+        .response_writer = &response_writer.writer,
+        .extra_headers = &[_]std.http.Header{
+            .{ .name = "content-type", .value = "application/json" },
+        },
+    });
+    if (result.status != .ok) {
+        return error.TelegramRequestFailed;
+    }
+
+    const response = try response_writer.toOwnedSlice();
+    defer allocator.free(response);
+
+    const parsed = std.json.parseFromSlice(
+        TelegramGetFileResponse,
+        allocator,
+        response,
+        .{ .ignore_unknown_fields = true },
+    ) catch return error.TelegramRequestFailed;
+    defer parsed.deinit();
+
+    if (!parsed.value.ok) return error.TelegramRequestFailed;
+    const payload_result = parsed.value.result orelse return error.TelegramRequestFailed;
+    const remote_path = payload_result.file_path orelse return error.TelegramRequestFailed;
+    if (remote_path.len == 0) return error.TelegramRequestFailed;
+    return allocator.dupe(u8, remote_path);
+}
+
+fn downloadTelegramRemoteFileBytes(
+    allocator: Allocator,
+    client: *std.http.Client,
+    token: []const u8,
+    remote_path: []const u8,
+) ![]u8 {
+    const url = try std.fmt.allocPrint(
+        allocator,
+        "https://api.telegram.org/file/bot{s}/{s}",
+        .{ token, remote_path },
+    );
+    defer allocator.free(url);
+
+    var response_writer = std.Io.Writer.Allocating.init(allocator);
+    defer response_writer.deinit();
+
+    const result = try client.fetch(.{
+        .location = .{ .url = url },
+        .response_writer = &response_writer.writer,
+    });
+    if (result.status != .ok) {
+        return error.TelegramRequestFailed;
+    }
+
+    return response_writer.toOwnedSlice();
+}
+
+fn persistTelegramImageAttachment(
+    allocator: Allocator,
+    root: []const u8,
+    account: []const u8,
+    chat_id: i64,
+    update_id: i64,
+    remote_path: []const u8,
+    bytes: []const u8,
+) ![]u8 {
+    const media_dir = try std.fmt.allocPrint(
+        allocator,
+        "{s}/telegram/media/{s}/{d}",
+        .{ root, account, chat_id },
+    );
+    defer allocator.free(media_dir);
+    try std.fs.cwd().makePath(media_dir);
+
+    const basename = std.fs.path.basename(remote_path);
+    const safe_name = try sanitizeTelegramMediaBasename(allocator, basename);
+    defer allocator.free(safe_name);
+
+    const file_name = try std.fmt.allocPrint(allocator, "{d}-{s}", .{ update_id, safe_name });
+    defer allocator.free(file_name);
+
+    const target_path = try joinPath(allocator, media_dir, file_name);
+    errdefer allocator.free(target_path);
+
+    var file = try std.fs.createFileAbsolute(target_path, .{ .truncate = true });
+    defer file.close();
+    try file.writeAll(bytes);
+    return target_path;
+}
+
+fn sanitizeTelegramMediaBasename(allocator: Allocator, raw: []const u8) ![]u8 {
+    if (raw.len == 0) return allocator.dupe(u8, "image.bin");
+
+    var out = std.ArrayListUnmanaged(u8){};
+    defer out.deinit(allocator);
+
+    for (raw) |ch| {
+        const is_lower = ch >= 'a' and ch <= 'z';
+        const is_upper = ch >= 'A' and ch <= 'Z';
+        const is_digit = ch >= '0' and ch <= '9';
+        if (is_lower or is_upper or is_digit or ch == '.' or ch == '-' or ch == '_') {
+            try out.append(allocator, ch);
+        } else {
+            try out.append(allocator, '_');
+        }
+    }
+
+    if (out.items.len == 0) {
+        return allocator.dupe(u8, "image.bin");
+    }
+    return out.toOwnedSlice(allocator);
 }
 
 fn extractTelegramSlashCommand(text: []const u8) ?TelegramSlashCommand {
@@ -4308,6 +4611,59 @@ test "extractTelegramSlashCommand parses slash commands" {
     try testing.expectEqualStrings("11111", with_args.?.args);
 
     try testing.expect(extractTelegramSlashCommand("not slash") == null);
+}
+
+test "composeTelegramPromptWithImage adds @path context" {
+    const allocator = testing.allocator;
+
+    const with_text = try composeTelegramPromptWithImage(
+        allocator,
+        "what is in this screenshot?",
+        "/tmp/screen shot.png",
+    );
+    defer allocator.free(with_text);
+    try testing.expectEqualStrings(
+        "what is in this screenshot?\n@\"/tmp/screen shot.png\"",
+        with_text,
+    );
+
+    const no_text = try composeTelegramPromptWithImage(
+        allocator,
+        "",
+        "/tmp/screenshot.png",
+    );
+    defer allocator.free(no_text);
+    try testing.expectEqualStrings(
+        "Please analyze this attached image.\n@\"/tmp/screenshot.png\"",
+        no_text,
+    );
+}
+
+test "resolveTelegramImageFileId prefers photo then image document" {
+    const photos = [_]TelegramPhotoSize{
+        .{ .file_id = "small" },
+        .{ .file_id = "large" },
+    };
+    const photo_message = TelegramMessage{
+        .photo = photos[0..],
+    };
+    try testing.expectEqualStrings("large", resolveTelegramImageFileId(photo_message).?);
+
+    const image_doc = TelegramMessage{
+        .document = .{
+            .file_id = "doc-image",
+            .mime_type = "image/png",
+        },
+    };
+    try testing.expectEqualStrings("doc-image", resolveTelegramImageFileId(image_doc).?);
+
+    const non_image_doc = TelegramMessage{
+        .document = .{
+            .file_id = "doc-text",
+            .mime_type = "text/plain",
+        },
+    };
+    try testing.expect(resolveTelegramImageFileId(non_image_doc) == null);
 }
 
 test "executeTelegramSlashCommand can render status and clear sessions" {

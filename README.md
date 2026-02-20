@@ -60,6 +60,7 @@ Volt also registers a Telegram slash-command menu (`/help`, `/commands`, `/sessi
 
 Volt can render Telegram responses with Markdown formatting when the reply contains markdown markers (lists, headings, backticks, links, fences).
 If Telegram rejects Markdown for a response, Volt automatically retries as plain text.
+Telegram image attachments are downloaded into `<home>/telegram/media/<account>/<chat_id>/` and injected into zolt prompts as `@path` references so zolt can inspect them with its image-aware tooling.
 
 In Telegram, send:
 - `/help` to view the menu summary
