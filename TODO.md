@@ -18,6 +18,7 @@
   - Bootstraps and persists `telegram:<account>:<chat_id>` -> zolt `session_id` mappings in `credentials/telegram-zolt-sessions.json`.
   - Recreates stale zolt sessions when `session not found` is returned.
   - Handles slash commands (`/help`, `/commands`, `/sessions`, `/status`, `/reset`, `/models`) and registers them as Telegram menu commands.
+  - Builds a new-chat bootstrap context from `.volt` markdown guidance and workspace state paths.
 - Session utilities:
   - Added `clearTelegramZoltSessionId` and tests for slash-command session flows.
 - Local stdio passthrough mode when `volt` is run with no arguments.

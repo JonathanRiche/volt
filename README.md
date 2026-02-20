@@ -118,6 +118,8 @@ With `--zolt`, Volt executes `zolt run --session <session_id> {message}` and sto
 Behavior:
 
 - first message for a chat bootstraps a new zolt session (`zolt run --output json <message>`);
+  the first message is auto-prefixed with a `.volt` bootstrap context:
+  workspace layout, key state files, and discovered markdown guidance files.
 - first successful response writes the returned `session_id` into Volt’s mapping file;
 - subsequent messages reuse that mapping via `zolt run --session <session_id> <message>`;
 - stale mappings are recreated automatically if zolt returns `session not found`.

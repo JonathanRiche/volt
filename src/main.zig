@@ -251,6 +251,9 @@ const DefaultUpdateCheckJson = "{\"lastCheckedAt\":\"1970-01-01T00:00:00.000Z\"}
 const DefaultTelegramZoltSessionsJson = "{\"version\":1,\"sessions\":[]}";
 const DefaultGatewayToken = "volt-gateway-token";
 const DefaultGatewayBind = "127.0.0.1";
+const MaxVoltBootstrapContextBytes = 8192;
+const MaxVoltBootstrapMarkdownBytes = 1024;
+const MaxVoltBootstrapMarkdownFiles = 6;
 const MaxGatewayRequestSize = 64 * 1024;
 const GatewayServiceName = "volt-gateway";
 const GatewaySystemdUnit = "volt-gateway.service";
@@ -2514,6 +2517,16 @@ fn runTelegramThroughZolt(
         std.log.warn("volt: zolt session not found, recreating {s}", .{session_key});
     }
 
+    var bootstrap_message = message;
+    var bootstrap_message_owner = false;
+    if (buildVoltBootstrapContext(allocator, root, message)) |context| {
+        bootstrap_message = context;
+        bootstrap_message_owner = true;
+    } else |err| {
+        std.log.warn("volt: failed to build bootstrap context ({s}): {s}", .{ session_key, @errorName(err) });
+    }
+    defer if (bootstrap_message_owner) allocator.free(bootstrap_message);
+
     const bootstrap_output_mode = if (isZoltTextOutputMode(zolt_output_mode))
         DefaultZoltOutputMode
     else
@@ -2522,7 +2535,7 @@ fn runTelegramThroughZolt(
         allocator,
         zolt_command,
         null,
-        message,
+        bootstrap_message,
         bootstrap_output_mode,
     );
     defer allocator.free(session_output);
@@ -2676,6 +2689,133 @@ fn runZoltCommandForMessage(
     }
 
     return try allocator.dupe(u8, result.stdout);
+}
+
+fn buildVoltBootstrapContext(
+    allocator: Allocator,
+    root: []const u8,
+    user_message: []const u8,
+) ![]u8 {
+    var body = std.ArrayListUnmanaged(u8){};
+    defer body.deinit(allocator);
+
+    try body.appendSlice(allocator, "You are in a new conversation for this Telegram chat.\n");
+    try body.appendSlice(allocator, "Use the .volt workspace as authoritative context and keep continuity with its state files.\n");
+    try body.appendSlice(allocator, "When you answer, prefer practical actions and be explicit about file paths.\n\n");
+
+    const volt_json = try joinPath(allocator, root, "volt.json");
+    defer allocator.free(volt_json);
+    const sessions_json = try joinPath(allocator, root, "agents/main/sessions/sessions.json");
+    defer allocator.free(sessions_json);
+    const telegram_sessions_json = try joinPath(allocator, root, "credentials/telegram-zolt-sessions.json");
+    defer allocator.free(telegram_sessions_json);
+    const offset_default = try joinPath(allocator, root, "telegram/update-offset-default.json");
+    defer allocator.free(offset_default);
+    const update_check = try joinPath(allocator, root, "update-check.json");
+    defer allocator.free(update_check);
+    const telegram_allow_from = try joinPath(allocator, root, "credentials/telegram-allowFrom.json");
+    defer allocator.free(telegram_allow_from);
+    const credential_root = try joinPath(allocator, root, "credentials");
+    defer allocator.free(credential_root);
+
+    try body.appendSlice(allocator, "Workspace root:\n");
+    try body.appendSlice(allocator, root);
+    try body.appendSlice(allocator, "\n\nKey files and directories:\n");
+    try body.appendSlice(allocator, "- ");
+    try body.appendSlice(allocator, volt_json);
+    try body.appendSlice(allocator, "\n- ");
+    try body.appendSlice(allocator, sessions_json);
+    try body.appendSlice(allocator, " (agent session history)\n- ");
+    try body.appendSlice(allocator, telegram_sessions_json);
+    try body.appendSlice(allocator, " (telegram chat/session mapping)\n- ");
+    try body.appendSlice(allocator, offset_default);
+    try body.appendSlice(allocator, " (telegram state)\n- ");
+    try body.appendSlice(allocator, update_check);
+    try body.appendSlice(allocator, " (global update metadata)\n- ");
+    try body.appendSlice(allocator, telegram_allow_from);
+    try body.appendSlice(allocator, " (telegram allow list)\n- ");
+    try body.appendSlice(allocator, credential_root);
+    try body.appendSlice(allocator, "\n- ");
+    try body.appendSlice(allocator, root);
+    try body.appendSlice(allocator, "/agents/main/sessions\n");
+    try body.appendSlice(allocator, "\n");
+
+    var markdown_count: usize = 0;
+    try body.appendSlice(allocator, "Bootstrap docs discovered in this workspace:\n");
+    var workspace = try std.fs.openDirAbsolute(root, .{
+        .iterate = true,
+        .no_follow = true,
+    });
+    defer workspace.close();
+
+    var walker = try workspace.walk(allocator);
+    defer walker.deinit();
+
+    while (true) {
+        const next_entry = try walker.next();
+        if (next_entry == null) break;
+        const entry = next_entry.?;
+        if (markdown_count >= MaxVoltBootstrapMarkdownFiles) break;
+        if (entry.kind != .file) continue;
+        if (!isMarkdownFile(entry.basename)) continue;
+        if (isHiddenPath(std.mem.sliceTo(entry.path, 0))) continue;
+
+        const rel_path = std.mem.sliceTo(entry.path, 0);
+        const abs_path = try joinPath(allocator, root, rel_path);
+        defer allocator.free(abs_path);
+
+        const snippet = readFileSnippet(allocator, abs_path, MaxVoltBootstrapMarkdownBytes) catch {
+            continue;
+        };
+        defer allocator.free(snippet);
+
+        if (snippet.len == 0) continue;
+        markdown_count += 1;
+
+        try body.appendSlice(allocator, "- ");
+        try body.appendSlice(allocator, abs_path);
+        try body.appendSlice(allocator, "\n");
+        try body.appendSlice(allocator, snippet);
+        try body.appendSlice(allocator, "\n");
+    }
+
+    if (markdown_count == 0) {
+        try body.appendSlice(allocator, "- no markdown files were found\n");
+    }
+
+    try body.appendSlice(allocator, "\nUser message:\n");
+    try body.appendSlice(allocator, user_message);
+    try body.appendSlice(allocator, "\n");
+
+    if (body.items.len <= MaxVoltBootstrapContextBytes) {
+        return body.toOwnedSlice(allocator);
+    }
+
+    return try allocator.dupe(u8, body.items[0..MaxVoltBootstrapContextBytes]);
+}
+
+fn isMarkdownFile(candidate: []const u8) bool {
+    return std.mem.endsWith(u8, candidate, ".md") or std.mem.endsWith(u8, candidate, ".markdown");
+}
+
+fn isHiddenPath(candidate: []const u8) bool {
+    var it = std.mem.splitScalar(u8, candidate, '/');
+    while (it.next()) |segment| {
+        if (segment.len > 0 and segment[0] == '.') {
+            return true;
+        }
+    }
+    return false;
+}
+
+fn readFileSnippet(allocator: Allocator, path: []const u8, max_bytes: usize) ![]u8 {
+    if (max_bytes == 0) return allocator.dupe(u8, "");
+
+    var file = try std.fs.openFileAbsolute(path, .{});
+    defer file.close();
+
+    const snippet = try file.readToEndAlloc(allocator, max_bytes);
+    return snippet;
 }
 
 fn executeDispatchCommand(allocator: Allocator, argv: []const []const u8, ctx: TelegramDispatchContext) ![]u8 {
@@ -4007,6 +4147,59 @@ test "isZoltSessionNotFound detects session error output" {
     try testing.expect(!isZoltSessionNotFound("all good"));
 }
 
+test "buildVoltBootstrapContext includes workspace guidance and markdown snippets" {
+    const allocator = testing.allocator;
+    const root = try std.fmt.allocPrint(allocator, "/tmp/volt-bootstrap-context-test-{d}", .{std.time.milliTimestamp()});
+    defer allocator.free(root);
+
+    try std.fs.makeDirAbsolute(root);
+    defer std.fs.deleteTreeAbsolute(root) catch {};
+
+    const agents = try joinPath(allocator, root, "agents");
+    defer allocator.free(agents);
+    try std.fs.makeDirAbsolute(agents);
+
+    const agents_main = try joinPath(allocator, root, "agents/main");
+    defer allocator.free(agents_main);
+    try std.fs.makeDirAbsolute(agents_main);
+
+    const readme = try joinPath(allocator, root, "README.md");
+    defer allocator.free(readme);
+    var root_readme = try std.fs.createFileAbsolute(readme, .{ .truncate = true });
+    defer root_readme.close();
+    try root_readme.writeAll("Workspace overview\n");
+
+    const agents_readme = try joinPath(allocator, agents_main, "README.md");
+    defer allocator.free(agents_readme);
+    var agent_readme = try std.fs.createFileAbsolute(agents_readme, .{ .truncate = true });
+    defer agent_readme.close();
+    try agent_readme.writeAll("Agents bootstrap notes\n");
+
+    const context = try buildVoltBootstrapContext(allocator, root, "hello");
+    defer allocator.free(context);
+
+    try testing.expect(std.mem.indexOf(u8, context, "new conversation") != null);
+    try testing.expect(std.mem.indexOf(u8, context, root) != null);
+    try testing.expect(std.mem.indexOf(u8, context, "Workspace overview") != null);
+    try testing.expect(std.mem.indexOf(u8, context, "Agents bootstrap notes") != null);
+    try testing.expect(std.mem.indexOf(u8, context, "User message:\nhello\n") != null);
+}
+
+test "buildVoltBootstrapContext handles no markdown files" {
+    const allocator = testing.allocator;
+    const root = try std.fmt.allocPrint(allocator, "/tmp/volt-bootstrap-empty-test-{d}", .{std.time.milliTimestamp()});
+    defer allocator.free(root);
+
+    try std.fs.makeDirAbsolute(root);
+    defer std.fs.deleteTreeAbsolute(root) catch {};
+
+    const context = try buildVoltBootstrapContext(allocator, root, "first message");
+    defer allocator.free(context);
+
+    try testing.expect(std.mem.indexOf(u8, context, "no markdown files were found") != null);
+    try testing.expect(std.mem.indexOf(u8, context, "first message") != null);
+}
+
 test "telegram zolt session map persists across loads" {
     const allocator = testing.allocator;
     const root = try std.fmt.allocPrint(allocator, "/tmp/volt-zolt-map-test-{d}", .{std.time.milliTimestamp()});
@@ -4076,9 +4269,17 @@ test "runTelegramThroughZolt bootstraps and reuses zolt sessions" {
         \\
         \\if [ "$output_json" -eq 1 ]; then
         \\  if [ -z "$session" ]; then
-        \\    session="session_$message"
+        \\    response="bootstrap-without-context"
+        \\    case "$message" in
+        \\      *"Bootstrap docs discovered in this workspace"*)
+        \\        response="bootstrap-with-context"
+        \\        ;;
+        \\    esac
+        \\    session="session_${RANDOM}"
+        \\  else
+        \\    response="reuse:$session"
         \\  fi
-        \\  printf '{"session_id":"%s","response":"reply:%s"}' "$session" "$message"
+        \\  printf '{"session_id":"%s","response":"%s"}' "$session" "$response"
         \\  exit 0
         \\fi
         \\printf "ok:$session:$message"
@@ -4089,22 +4290,24 @@ test "runTelegramThroughZolt bootstraps and reuses zolt sessions" {
     const session_key = "telegram:default:1111";
     const response_one = try runTelegramThroughZolt(allocator, root, zolt_command, session_key, "hello", "json");
     defer allocator.free(response_one);
-    try testing.expectEqualStrings("reply:hello", response_one);
+    try testing.expectEqualStrings("bootstrap-with-context", response_one);
 
     const session_one = try loadTelegramZoltSessionId(allocator, root, session_key);
     defer if (session_one) |session| allocator.free(session);
-    try testing.expectEqualStrings("session_hello", session_one.?);
+    try testing.expect(session_one != null);
+    try testing.expect(std.mem.startsWith(u8, session_one.?, "session_"));
 
     const response_two = try runTelegramThroughZolt(allocator, root, zolt_command, session_key, "again", "json");
     defer allocator.free(response_two);
-    try testing.expectEqualStrings("reply:again", response_two);
+    try testing.expect(std.mem.indexOf(u8, response_two, "reuse:") != null);
 
     try persistTelegramZoltSessionId(allocator, root, session_key, "stale");
     const response_three = try runTelegramThroughZolt(allocator, root, zolt_command, session_key, "fixed", "json");
     defer allocator.free(response_three);
-    try testing.expectEqualStrings("reply:fixed", response_three);
+    try testing.expectEqualStrings("bootstrap-with-context", response_three);
 
     const session_three = try loadTelegramZoltSessionId(allocator, root, session_key);
     defer if (session_three) |session| allocator.free(session);
-    try testing.expectEqualStrings("session_fixed", session_three.?);
+    try testing.expect(session_three != null);
+    try testing.expect(!std.mem.eql(u8, session_three.?, "stale"));
 }
