@@ -45,6 +45,13 @@ Notes:
 - default account (`default`) writes `channels.telegram.botToken`.
 - non-default account writes `channels.telegram.accounts.<account>.botToken`.
 - writes `credentials/telegram-allowFrom.json` and `credentials/telegram-pairing.json`.
+- `--allow-from` is optional. If omitted, Volt allows all chats.
+
+Tip:
+
+```bash
+volt telegram setup --home ~/.volt --token "<bot_token>"
+```
 
 ### `volt --telegram`
 

@@ -224,6 +224,8 @@ fn printUsage() !void {
         "\n" ++
         "Dispatch placeholders (for --dispatch args):\n" ++
         "  {message} / {text}, {chat_id}, {account}, {session}\n" ++
+        "Allow list behavior:\n" ++
+        "  omitting --allow-from allows all chats to use the bot.\n" ++
         "Use --zolt to run messages through: zolt run --session {session} {message}.\n" ++
         "Run `zolt run -h` (or `zolt run --help`) for current supported flags.\n" ++
         "Resolution order for --zolt is: --zolt-path/VOLT_ZOLT_PATH, bundled volt/zolt, then system PATH.\n" ++
@@ -231,6 +233,7 @@ fn printUsage() !void {
         "\n" ++
         "Examples:\n" ++
         "  volt init --home ~/.volt\n" ++
+        "  volt telegram setup --home ~/.volt --token 123:ABC\n" ++
         "  volt telegram setup --token 123:ABC --account work --allow-from 8257801789\n" ++
         "  volt --telegram --dispatch \"zolt -s {session} {message}\"\n");
 }

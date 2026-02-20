@@ -42,6 +42,16 @@ Initialize workspace layout with:
 volt init --home ~/.volt
 ```
 
+### Telegram setup (token only)
+
+Use token-only setup like OpenClaw:
+
+```bash
+volt telegram setup --home ~/.volt --token "<bot_token>"
+```
+
+`--allow-from` is optional. If omitted, Volt allows all chats to use the bot.
+
 Volt can bundle a local `zolt` checkout so `--zolt` can run without a preinstalled system `zolt` binary. When bundling is enabled, Volt prefers:
 
 1. local source via `-Dzolt-source=...` (or `../zolt` if present),
