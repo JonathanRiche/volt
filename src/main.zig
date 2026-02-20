@@ -255,11 +255,60 @@ const GatewaySystemdUnit = "volt-gateway.service";
 const GatewayLaunchdLabel = "com.volt.gateway";
 const DefaultAccountId = "default";
 const DefaultCommandCheckArgv = [_][]const u8{ "--help", "-h" };
+const DefaultVoltDebugOutputChars = 2048;
+const VoltDebugEnvVar = "VOLT_DEBUG";
+
+var g_debug_enabled: ?bool = null;
 
 fn isHelp(arg: []const u8) bool {
     return std.mem.eql(u8, arg, "--help") or
         std.mem.eql(u8, arg, "-h") or
         std.mem.eql(u8, arg, "help");
+}
+
+fn isVoltDebugEnabled(allocator: Allocator) bool {
+    if (g_debug_enabled) |cached| return cached;
+    const value = std.process.getEnvVarOwned(allocator, VoltDebugEnvVar) catch |err| {
+        if (err == error.EnvironmentVariableNotFound) {
+            g_debug_enabled = false;
+            return false;
+        }
+        g_debug_enabled = false;
+        return false;
+    };
+    defer allocator.free(value);
+
+    const trimmed = std.mem.trim(u8, value, " \t\r\n");
+    const enabled = std.ascii.eqlIgnoreCase(trimmed, "1") or
+        std.ascii.eqlIgnoreCase(trimmed, "true") or
+        std.ascii.eqlIgnoreCase(trimmed, "yes") or
+        std.ascii.eqlIgnoreCase(trimmed, "on") or
+        std.ascii.eqlIgnoreCase(trimmed, "y");
+    g_debug_enabled = enabled;
+    return enabled;
+}
+
+fn debugPrint(allocator: Allocator, comptime format: []const u8, args: anytype) void {
+    if (!isVoltDebugEnabled(allocator)) return;
+    std.fs.File.stderr().deprecatedWriter().print("[volt debug] " ++ format ++ "\n", args) catch {};
+}
+
+fn debugArgv(allocator: Allocator, prefix: []const u8, argv: []const []const u8) void {
+    if (!isVoltDebugEnabled(allocator)) return;
+
+    var stderr = std.fs.File.stderr().deprecatedWriter();
+    stderr.print("[volt debug] {s}: ", .{prefix}) catch {};
+    for (argv, 0..) |arg, idx| {
+        if (idx > 0) stderr.print(" ", .{}) catch {};
+        stderr.print("\"{s}\"", .{arg}) catch {};
+    }
+    stderr.print("\n", .{}) catch {};
+}
+
+fn debugSnippet(allocator: Allocator, payload: []const u8) []const u8 {
+    const max_len = DefaultVoltDebugOutputChars;
+    if (!isVoltDebugEnabled(allocator) or payload.len <= max_len) return payload;
+    return payload[0..max_len];
 }
 
 fn printUsage() !void {
@@ -2504,6 +2553,7 @@ fn runZoltCommandForMessage(
     }
     try argv.append(allocator, message);
 
+    debugArgv(allocator, "zolt argv", argv.items);
     const result = try std.process.Child.run(.{
         .allocator = allocator,
         .argv = argv.items,
@@ -2511,6 +2561,17 @@ fn runZoltCommandForMessage(
     defer {
         allocator.free(result.stdout);
         allocator.free(result.stderr);
+    }
+    debugPrint(allocator, "zolt exit: {any}", .{result.term});
+    debugPrint(allocator, "zolt stdout({d} bytes): {s}", .{
+        result.stdout.len,
+        debugSnippet(allocator, result.stdout),
+    });
+    if (result.stderr.len > 0) {
+        debugPrint(allocator, "zolt stderr({d} bytes): {s}", .{
+            result.stderr.len,
+            debugSnippet(allocator, result.stderr),
+        });
     }
 
     if (include_json_output) {

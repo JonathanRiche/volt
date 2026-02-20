@@ -224,6 +224,7 @@ Running `volt` with no args starts local command passthrough mode (read a line f
 - `TELEGRAM_BOT_TOKEN`
 - `VOLT_ZOLT_PATH`
 - `VOLT_GATEWAY_TOKEN`
+- `VOLT_DEBUG=1` (enable debug logging for zolt command execution and payload snippets)
 
 ## Build flags
 

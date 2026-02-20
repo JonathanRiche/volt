@@ -70,6 +70,14 @@ To get your chat id, send a message to the bot and inspect `chat.id` from:
 curl -s "https://api.telegram.org/bot<TOKEN>/getUpdates"
 ```
 
+Enable debug tracing when needed:
+
+```bash
+VOLT_DEBUG=1 volt --telegram --home ~/.volt --zolt
+```
+
+Debug output prints the exact zolt command line and stdout/stderr snippets in stderr.
+
 Volt can bundle a local `zolt` checkout so `--zolt` can run without a preinstalled system `zolt` binary. When bundling is enabled, Volt prefers:
 
 1. local source via `-Dzolt-source=...` (or `../zolt` if present),
