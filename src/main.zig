@@ -251,9 +251,17 @@ const DefaultUpdateCheckJson = "{\"lastCheckedAt\":\"1970-01-01T00:00:00.000Z\"}
 const DefaultTelegramZoltSessionsJson = "{\"version\":1,\"sessions\":[]}";
 const DefaultGatewayToken = "volt-gateway-token";
 const DefaultGatewayBind = "127.0.0.1";
-const MaxVoltBootstrapContextBytes = 8192;
-const MaxVoltBootstrapMarkdownBytes = 1024;
-const MaxVoltBootstrapMarkdownFiles = 6;
+fn isSessionMetadataPath(candidate: []const u8) bool {
+    var it = std.mem.splitScalar(u8, candidate, '/');
+    while (it.next()) |segment| {
+        if (std.mem.eql(u8, segment, "sessions") or
+            std.mem.eql(u8, segment, "session"))
+        {
+            return true;
+        }
+    }
+    return false;
+}
 const MaxGatewayRequestSize = 64 * 1024;
 const GatewayServiceName = "volt-gateway";
 const GatewaySystemdUnit = "volt-gateway.service";
@@ -2740,8 +2748,8 @@ fn buildVoltBootstrapContext(
     try body.appendSlice(allocator, "/agents/main/sessions\n");
     try body.appendSlice(allocator, "\n");
 
-    var markdown_count: usize = 0;
     try body.appendSlice(allocator, "Bootstrap docs discovered in this workspace:\n");
+    var has_markdown_files = false;
     var workspace = try std.fs.openDirAbsolute(root, .{
         .iterate = true,
         .no_follow = true,
@@ -2755,22 +2763,22 @@ fn buildVoltBootstrapContext(
         const next_entry = try walker.next();
         if (next_entry == null) break;
         const entry = next_entry.?;
-        if (markdown_count >= MaxVoltBootstrapMarkdownFiles) break;
         if (entry.kind != .file) continue;
         if (!isMarkdownFile(entry.basename)) continue;
         if (isHiddenPath(std.mem.sliceTo(entry.path, 0))) continue;
+        if (isSessionMetadataPath(std.mem.sliceTo(entry.path, 0))) continue;
 
         const rel_path = std.mem.sliceTo(entry.path, 0);
         const abs_path = try joinPath(allocator, root, rel_path);
         defer allocator.free(abs_path);
 
-        const snippet = readFileSnippet(allocator, abs_path, MaxVoltBootstrapMarkdownBytes) catch {
+        const snippet = readFileSnippet(allocator, abs_path) catch {
             continue;
         };
         defer allocator.free(snippet);
 
         if (snippet.len == 0) continue;
-        markdown_count += 1;
+        has_markdown_files = true;
 
         try body.appendSlice(allocator, "- ");
         try body.appendSlice(allocator, abs_path);
@@ -2779,19 +2787,14 @@ fn buildVoltBootstrapContext(
         try body.appendSlice(allocator, "\n");
     }
 
-    if (markdown_count == 0) {
+    if (!has_markdown_files) {
         try body.appendSlice(allocator, "- no markdown files were found\n");
     }
 
     try body.appendSlice(allocator, "\nUser message:\n");
     try body.appendSlice(allocator, user_message);
     try body.appendSlice(allocator, "\n");
-
-    if (body.items.len <= MaxVoltBootstrapContextBytes) {
-        return body.toOwnedSlice(allocator);
-    }
-
-    return try allocator.dupe(u8, body.items[0..MaxVoltBootstrapContextBytes]);
+    return body.toOwnedSlice(allocator);
 }
 
 fn isMarkdownFile(candidate: []const u8) bool {
@@ -2808,13 +2811,15 @@ fn isHiddenPath(candidate: []const u8) bool {
     return false;
 }
 
-fn readFileSnippet(allocator: Allocator, path: []const u8, max_bytes: usize) ![]u8 {
-    if (max_bytes == 0) return allocator.dupe(u8, "");
+fn readFileSnippet(allocator: Allocator, path: []const u8) ![]u8 {
+    if (std.mem.eql(u8, path, "")) {
+        return allocator.dupe(u8, "");
+    }
 
     var file = try std.fs.openFileAbsolute(path, .{});
     defer file.close();
 
-    const snippet = try file.readToEndAlloc(allocator, max_bytes);
+    const snippet = try file.readToEndAlloc(allocator, std.math.maxInt(usize));
     return snippet;
 }
 
