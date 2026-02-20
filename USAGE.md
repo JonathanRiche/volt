@@ -35,6 +35,18 @@ volt init [--mirror-volt] [--source <path>] [--home <path>] [--force]
 `volt init` also seeds workspace guidance markdown templates by default:
 `AGENTS.md`, `BOOTSTRAP.md`, `SOUL.md`, `TOOLS.md`, `IDENTITY.md`, `USER.md`, and `HEARTBEAT.md`.
 
+### `volt model set` / `volt model show`
+
+Persist zolt provider/model defaults in `volt.json`:
+
+```bash
+volt model set --provider <provider> --model <model> [--account <id>] [--home <path>]
+volt model show [--account <id>] [--home <path>]
+```
+
+- default account writes `zolt.provider` and `zolt.model`.
+- named account writes `zolt.accounts.<account>.provider` and `zolt.accounts.<account>.model`.
+
 ### `volt telegram setup`
 
 Set up Telegram config and state for the default or named account.
@@ -53,7 +65,7 @@ Notes:
 Tip:
 
 ```bash
-volt telegram setup --home ~/.volt --token "<bot_token>"
+volt telegram setup --token "<bot_token>"
 ```
 
 ### `volt --telegram`
@@ -61,7 +73,7 @@ volt telegram setup --home ~/.volt --token "<bot_token>"
 Run the Telegram polling loop.
 
 ```bash
-volt --telegram [--token <token>] [--account <id>] [--home <path>] [--dispatch <command>] [--zolt] [--poll-ms <ms>]
+volt --telegram [--token <token>] [--account <id>] [--home <path>] [--dispatch <command>] [--zolt] [--zolt-path <path>] [--zolt-output <text|json|logs|json-stream>] [--poll-ms <ms>]
 ```
 
 `--dispatch` runs as parsed argv tokens, not shell text.
@@ -93,9 +105,10 @@ Slash commands are available in Telegram and are registered as command menu entr
 - `/sessions` - show active zolt session for this chat
 - `/status` - show runtime status, plus last provider/model, token usage, context-left estimate, and compaction count if zolt returns usage in JSON
 - `/reset` - clear this chat's zolt session mapping
-- `/models` - run `zolt models` (requires `--zolt`)
+- `/models` - list models for configured providers only (requires `--zolt`)
+- `/model` - show or set provider/model for this account (`/model <provider> <model>` or `/model <model>`)
 
-Run `zolt run -h` to check supported flags (for example `-s` / `--session`).
+Run `zolt --help` to check supported flags.
 
 `--zolt-path <path>` sets the exact executable used for zolt mode, overriding `zolt` in PATH.
 You can also set `VOLT_ZOLT_PATH`.
@@ -141,6 +154,11 @@ If `--token` is omitted, token resolution is:
 4. default `channels.telegram.botToken`
 5. `TELEGRAM_BOT_TOKEN`
 
+If `--zolt` is enabled, Volt resolves model/provider in this order:
+
+1. account config in `volt.json` at `zolt.accounts.<account>.provider` / `zolt.accounts.<account>.model`
+2. global config in `volt.json` at `zolt.provider` / `zolt.model`
+
 Example:
 
 ```bash
@@ -172,14 +190,14 @@ Notes:
 - Linux uses `systemd --user` units under `$XDG_CONFIG_HOME/systemd/user` (or `~/.config/systemd/user`).
 - macOS uses `~/Library/LaunchAgents/com.volt.telegram.plist`.
 - On macOS, `status` currently reports bootstrap state from `launchctl print`.
-- `list` prints configured accounts, mapped chat counts, service status, and service-bound account.
+- `list` prints configured accounts, token/model/provider defaults, mapped chat counts, service status, and service-bound account.
 
 ### `volt gateway`
 
 Start a tiny HTTP gateway for text-message style clients.
 
 ```bash
-volt gateway [--home <path>] [--bind <ip>] [--port <port>] [--account <id>] [--dispatch <command>] [--zolt] [--zolt-path <path>] [--auth-token <token>]
+volt gateway [--home <path>] [--bind <ip>] [--port <port>] [--account <id>] [--dispatch <command>] [--zolt] [--zolt-path <path>] [--zolt-output <text|json|logs|json-stream>] [--auth-token <token>]
 ```
 
 Defaults:
@@ -230,12 +248,12 @@ curl -H "Authorization: Bearer volt-gateway-token" \
 Manage the gateway as a persistent background process with the platform service manager:
 
 ```bash
-volt gateway install [--home <path>] [--bind <ip>] [--port <port>] [--account <id>] [--dispatch <command>] [--zolt] [--zolt-path <path>] [--auth-token <token>]
-volt gateway start [--home <path>] [--bind <ip>] [--port <port>] [--account <id>] [--dispatch <command>] [--zolt] [--zolt-path <path>] [--auth-token <token>]
-volt gateway stop [--home <path>] [--bind <ip>] [--port <port>] [--account <id>] [--dispatch <command>] [--zolt] [--zolt-path <path>] [--auth-token <token>]
-volt gateway restart [--home <path>] [--bind <ip>] [--port <port>] [--account <id>] [--dispatch <command>] [--zolt] [--zolt-path <path>] [--auth-token <token>]
-volt gateway status [--home <path>] [--bind <ip>] [--port <port>] [--account <id>] [--dispatch <command>] [--zolt] [--zolt-path <path>] [--auth-token <token>]
-volt gateway uninstall [--home <path>] [--bind <ip>] [--port <port>] [--account <id>] [--dispatch <command>] [--zolt] [--zolt-path <path>] [--auth-token <token>]
+volt gateway install [--home <path>] [--bind <ip>] [--port <port>] [--account <id>] [--dispatch <command>] [--zolt] [--zolt-path <path>] [--zolt-output <text|json|logs|json-stream>] [--auth-token <token>]
+volt gateway start [--home <path>] [--bind <ip>] [--port <port>] [--account <id>] [--dispatch <command>] [--zolt] [--zolt-path <path>] [--zolt-output <text|json|logs|json-stream>] [--auth-token <token>]
+volt gateway stop [--home <path>] [--bind <ip>] [--port <port>] [--account <id>] [--dispatch <command>] [--zolt] [--zolt-path <path>] [--zolt-output <text|json|logs|json-stream>] [--auth-token <token>]
+volt gateway restart [--home <path>] [--bind <ip>] [--port <port>] [--account <id>] [--dispatch <command>] [--zolt] [--zolt-path <path>] [--zolt-output <text|json|logs|json-stream>] [--auth-token <token>]
+volt gateway status [--home <path>] [--bind <ip>] [--port <port>] [--account <id>] [--dispatch <command>] [--zolt] [--zolt-path <path>] [--zolt-output <text|json|logs|json-stream>] [--auth-token <token>]
+volt gateway uninstall [--home <path>] [--bind <ip>] [--port <port>] [--account <id>] [--dispatch <command>] [--zolt] [--zolt-path <path>] [--zolt-output <text|json|logs|json-stream>] [--auth-token <token>]
 ```
 
 Notes:
@@ -272,7 +290,7 @@ Use `--account` to configure and run separate Telegram bots/accounts against one
 ### Setup default account
 
 ```bash
-volt telegram setup --home ~/.volt --token "<default_bot_token>"
+volt telegram setup --token "<default_bot_token>"
 ```
 
 This writes:
@@ -282,7 +300,7 @@ This writes:
 ### Setup a named account
 
 ```bash
-volt telegram setup --home ~/.volt --account work --token "<work_bot_token>"
+volt telegram setup --account work --token "<work_bot_token>"
 ```
 
 This writes:
@@ -292,19 +310,19 @@ This writes:
 ### Run default account in gateway mode
 
 ```bash
-volt --telegram --home ~/.volt
+volt --telegram
 ```
 
 ### Run a named account in gateway mode
 
 ```bash
-volt --telegram --home ~/.volt --account work
+volt --telegram --account work
 ```
 
 ### Run a local gateway with zolt dispatch
 
 ```bash
-volt gateway --home ~/.volt --zolt --auth-token my-secret-token
+volt gateway --zolt --auth-token my-secret-token
 ```
 
 Then configure clients to POST to `http://127.0.0.1:18789/invoke`.
@@ -312,7 +330,7 @@ Then configure clients to POST to `http://127.0.0.1:18789/invoke`.
 ### Use account-specific allow list while keeping separate default allow list
 
 ```bash
-volt telegram setup --home ~/.volt --account work --token "<work_bot_token>" --allow-from 111111111 --allow-from 222222222
+volt telegram setup --account work --token "<work_bot_token>" --allow-from 111111111 --allow-from 222222222
 ```
 
 This stores the allowlist in the shared `credentials/telegram-allowFrom.json` used by gateway runtime.

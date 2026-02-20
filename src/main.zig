@@ -116,6 +116,18 @@ const TelegramListOptions = struct {
     account: ?[]const u8,
 };
 
+const ModelSetOptions = struct {
+    home_path: ?[]const u8,
+    account: ?[]const u8,
+    provider: ?[]const u8,
+    model: ?[]const u8,
+};
+
+const ModelShowOptions = struct {
+    home_path: ?[]const u8,
+    account: ?[]const u8,
+};
+
 const TelegramRunOptions = struct {
     home_path: ?[]const u8,
     token: ?[]const u8,
@@ -153,7 +165,10 @@ const GatewayRoute = enum { health, status, invoke, unknown };
 
 const GatewayError = error{ GatewayAuthMissing, GatewayBadRequest };
 const GatewayServiceError = error{ GatewayServiceUnsupportedPlatform, GatewayServiceCommandFailed };
-const VoltError = error{ZoltSessionIdMissing};
+const VoltError = error{
+    ZoltSessionIdMissing,
+    ZoltProviderRequiredForModel,
+};
 
 const DefaultZoltDispatch = "zolt run --session {session} {message}";
 
@@ -173,7 +188,8 @@ const VoltTelegramSlashCommands = [_]TelegramSlashCommandInfo{
     .{ .command = "sessions", .description = "Show the active zolt session for this chat" },
     .{ .command = "status", .description = "Show runtime status for this chat" },
     .{ .command = "reset", .description = "Reset the active zolt session for this chat" },
-    .{ .command = "models", .description = "Show available model information (zolt mode)" },
+    .{ .command = "models", .description = "Show available models for configured providers" },
+    .{ .command = "model", .description = "Show or set provider/model for this account" },
 };
 
 const TelegramZoltSessionMapEntry = struct {
@@ -454,6 +470,8 @@ fn printUsage() !void {
     try out.writeAll("volt: lightweight cli for local stdio + telegram gateway\n" ++
         "Usage:\n" ++
         "  volt init [--mirror-volt] [--source <path>] [--home <path>] [--force]\n" ++
+        "  volt model set --provider <provider> --model <model> [--account <id>] [--home <path>]\n" ++
+        "  volt model show [--account <id>] [--home <path>]\n" ++
         "  volt telegram setup --token <token> [--account <id>] [--allow-from <chat_id>]... [--home <path>] [--force]\n" ++
         "  volt telegram list [--home <path>] [--account <id>]\n" ++
         "  volt telegram install|start|stop|restart|status|uninstall [--token <token>] [--account <id>] [--home <path>] [--dispatch <command>] [--zolt] [--zolt-path <path>] [--zolt-output <text|json|logs|json-stream>] [--poll-ms <ms>]\n" ++
@@ -467,16 +485,16 @@ fn printUsage() !void {
         "  omitting --allow-from allows all chats to use the bot.\n" ++
         "Use --zolt to run messages through: zolt run --session {session} {message}.\n" ++
         "Default zolt output mode is `json` for Telegram/gateway zolt flows.\n" ++
-        "Run `zolt run -h` (or `zolt run --help`) for current supported flags.\n" ++
+        "Run `zolt --help` for current supported run flags.\n" ++
         "Resolution order for --zolt is: --zolt-path/VOLT_ZOLT_PATH, bundled volt/zolt, then system PATH.\n" ++
         "Set --zolt-path explicitly or the `VOLT_ZOLT_PATH` env var to point at a specific binary.\n" ++
         "\n" ++
         "Examples:\n" ++
-        "  volt init --home ~/.volt\n" ++
+        "  volt init\n" ++
         "  (init seeds: volt.json + bootstrap markdown files AGENTS.md, BOOTSTRAP.md, SOUL.md, TOOLS.md, IDENTITY.md, USER.md, HEARTBEAT.md)\n" ++
-        "  volt telegram setup --home ~/.volt --token 123:ABC\n" ++
+        "  volt telegram setup --token 123:ABC\n" ++
         "  volt telegram setup --token 123:ABC --account work --allow-from 8257801789\n" ++
-        "  volt --telegram --dispatch \"zolt -s {session} {message}\"\n");
+        "  volt --telegram --zolt\n");
 }
 
 pub fn main() !void {
@@ -500,6 +518,25 @@ pub fn main() !void {
     if (std.mem.eql(u8, args[1], "init")) {
         const opts = try parseInitOptions(args[2..]);
         try runInit(allocator, opts);
+        return;
+    }
+
+    if (std.mem.eql(u8, args[1], "model")) {
+        if (args.len < 3) {
+            try printUsage();
+            return;
+        }
+        if (std.mem.eql(u8, args[2], "set")) {
+            const opts = try parseModelSetOptions(args[3..]);
+            try runModelSet(allocator, opts);
+            return;
+        }
+        if (std.mem.eql(u8, args[2], "show") or std.mem.eql(u8, args[2], "get")) {
+            const opts = try parseModelShowOptions(args[3..]);
+            try runModelShow(allocator, opts);
+            return;
+        }
+        try printUsage();
         return;
     }
 
@@ -596,6 +633,18 @@ fn runGateway(allocator: Allocator, opts: GatewayRunOptions) !void {
     const default_account = try normalizeAccountId(allocator, opts.account);
     defer allocator.free(default_account);
 
+    const config_data = blk: {
+        const path = try resolveConfigPath(allocator, root);
+        defer allocator.free(path);
+
+        const data = readFileAlloc(allocator, path) catch |err| {
+            if (err == error.FileNotFound) break :blk null;
+            return err;
+        };
+        break :blk data;
+    };
+    defer if (config_data) |data| allocator.free(data);
+
     const auth_token = try resolveGatewayAuthToken(allocator, root, opts.auth_token);
     defer allocator.free(auth_token);
 
@@ -603,18 +652,37 @@ fn runGateway(allocator: Allocator, opts: GatewayRunOptions) !void {
         const zolt_cmd = try resolveZoltCommand(allocator, opts.zolt_command);
         defer allocator.free(zolt_cmd);
         const zolt_output_mode = try resolveZoltOutputMode(opts.zolt_output);
+        const zolt_selection = try resolveZoltSelectionForAccount(
+            allocator,
+            config_data,
+            default_account,
+            null,
+            null,
+        );
+        defer zolt_selection.deinit(allocator);
+
+        const resolved_provider_arg = if (zolt_selection.provider) |provider|
+            try std.fmt.allocPrint(allocator, " --provider {s}", .{provider})
+        else
+            try allocator.dupe(u8, "");
+        defer allocator.free(resolved_provider_arg);
+        const resolved_model_arg = if (zolt_selection.model) |model|
+            try std.fmt.allocPrint(allocator, " --model {s}", .{model})
+        else
+            try allocator.dupe(u8, "");
+        defer allocator.free(resolved_model_arg);
 
         const zolt_dispatch = if (isZoltTextOutputMode(zolt_output_mode))
             try std.fmt.allocPrint(
                 allocator,
-                "{s} run --session {s} {s}",
-                .{ zolt_cmd, "{session}", "{message}" },
+                "{s} run{s}{s} --session {s} {s}",
+                .{ zolt_cmd, resolved_provider_arg, resolved_model_arg, "{session}", "{message}" },
             )
         else
             try std.fmt.allocPrint(
                 allocator,
-                "{s} run --output {s} --session {s} {s}",
-                .{ zolt_cmd, zolt_output_mode, "{session}", "{message}" },
+                "{s} run{s}{s} --output {s} --session {s} {s}",
+                .{ zolt_cmd, resolved_provider_arg, resolved_model_arg, zolt_output_mode, "{session}", "{message}" },
             );
         defer allocator.free(zolt_dispatch);
 
@@ -1104,7 +1172,13 @@ fn runTelegramSetup(allocator: Allocator, opts: TelegramSetupOptions) !void {
     const workspace = try std.process.getCwdAlloc(allocator);
     defer allocator.free(workspace);
 
-    const volt = try renderVoltConfig(allocator, token, workspace, template_text, account);
+    const volt = try renderVoltConfig(
+        allocator,
+        token,
+        workspace,
+        template_text,
+        account,
+    );
     defer allocator.free(volt);
 
     const volt_path = try joinPath(allocator, root, "volt.json");
@@ -1136,6 +1210,136 @@ fn runTelegramSetup(allocator: Allocator, opts: TelegramSetupOptions) !void {
     }
 }
 
+fn runModelSet(allocator: Allocator, opts: ModelSetOptions) !void {
+    const provider_raw = opts.provider orelse return error.UnexpectedArgument;
+    const model_raw = opts.model orelse return error.UnexpectedArgument;
+    const provider = std.mem.trim(u8, provider_raw, " \t\r\n");
+    const model = std.mem.trim(u8, model_raw, " \t\r\n");
+    if (provider.len == 0 or model.len == 0) return error.UnexpectedArgument;
+
+    const account = try normalizeAccountId(allocator, opts.account);
+    defer allocator.free(account);
+
+    const root = try resolveHomePath(allocator, opts.home_path);
+    defer allocator.free(root);
+    try ensureDirIfMissing(root);
+
+    const config_path = try resolveConfigPath(allocator, root);
+    defer allocator.free(config_path);
+
+    const config_data = readFileAlloc(allocator, config_path) catch |err| switch (err) {
+        error.FileNotFound => null,
+        else => return err,
+    };
+    defer if (config_data) |data| allocator.free(data);
+
+    const rendered = if (config_data) |data|
+        try renderVoltConfigWithModelSelection(allocator, data, account, provider, model)
+    else
+        try renderEmptyConfigWithModelSelection(allocator, account, provider, model);
+    defer allocator.free(rendered);
+
+    try writeTextFile(config_path, rendered, true);
+}
+
+fn runModelShow(allocator: Allocator, opts: ModelShowOptions) !void {
+    const account = try normalizeAccountId(allocator, opts.account);
+    defer allocator.free(account);
+
+    const root = try resolveHomePath(allocator, opts.home_path);
+    defer allocator.free(root);
+
+    const config_path = try resolveConfigPath(allocator, root);
+    defer allocator.free(config_path);
+
+    const config_data = readFileAlloc(allocator, config_path) catch |err| switch (err) {
+        error.FileNotFound => null,
+        else => return err,
+    };
+    defer if (config_data) |data| allocator.free(data);
+
+    const selection = try resolveZoltSelectionForAccount(allocator, config_data, account, null, null);
+    defer selection.deinit(allocator);
+
+    const provider = selection.provider orelse "unset";
+    const model = selection.model orelse "unset";
+    try std.fs.File.stdout().deprecatedWriter().print(
+        "account: {s}\nprovider: {s}\nmodel: {s}\n",
+        .{ account, provider, model },
+    );
+}
+
+fn renderVoltConfigWithModelSelection(
+    allocator: Allocator,
+    config_text: []const u8,
+    account: []const u8,
+    provider: []const u8,
+    model: []const u8,
+) ![]u8 {
+    var parsed = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        config_text,
+        .{ .ignore_unknown_fields = true },
+    );
+    defer parsed.deinit();
+
+    const root = &parsed.value;
+    const json_allocator = parsed.arena.allocator();
+    try patchZoltSelectionValue(json_allocator, root, account, provider, model);
+
+    var out = std.Io.Writer.Allocating.init(allocator);
+    defer out.deinit();
+
+    var stringify = std.json.Stringify{ .writer = &out.writer, .options = .{} };
+    try stringify.write(root.*);
+    return out.toOwnedSlice();
+}
+
+fn renderEmptyConfigWithModelSelection(
+    allocator: Allocator,
+    account: []const u8,
+    provider: []const u8,
+    model: []const u8,
+) ![]u8 {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    const json_allocator = arena.allocator();
+    var root: std.json.Value = .{ .object = std.json.ObjectMap.init(json_allocator) };
+    try patchZoltSelectionValue(json_allocator, &root, account, provider, model);
+
+    var out = std.Io.Writer.Allocating.init(allocator);
+    defer out.deinit();
+
+    var stringify = std.json.Stringify{ .writer = &out.writer, .options = .{} };
+    try stringify.write(root);
+    return out.toOwnedSlice();
+}
+
+fn patchZoltSelectionValue(
+    allocator: Allocator,
+    root: *std.json.Value,
+    account: []const u8,
+    provider: []const u8,
+    model: []const u8,
+) !void {
+    if (root.* != .object) {
+        root.* = .{ .object = std.json.ObjectMap.init(allocator) };
+    }
+
+    if (std.mem.eql(u8, account, DefaultAccountId)) {
+        try setJsonStringField(allocator, root, &.{ "zolt", "provider" }, provider);
+        try setJsonStringField(allocator, root, &.{ "zolt", "model" }, model);
+        return;
+    }
+
+    const provider_path = [_][]const u8{ "zolt", "accounts", account, "provider" };
+    const model_path = [_][]const u8{ "zolt", "accounts", account, "model" };
+    try setJsonStringField(allocator, root, provider_path[0..], provider);
+    try setJsonStringField(allocator, root, model_path[0..], model);
+}
+
 fn runTelegramGateway(allocator: Allocator, opts: TelegramRunOptions) !void {
     const root = try resolveHomePath(allocator, opts.home_path);
     defer allocator.free(root);
@@ -1143,21 +1347,26 @@ fn runTelegramGateway(allocator: Allocator, opts: TelegramRunOptions) !void {
     const account = try normalizeAccountId(allocator, opts.account);
     defer allocator.free(account);
 
-    const token = blk: {
-        if (opts.token) |token_arg| {
-            break :blk try allocator.dupe(u8, token_arg);
-        }
-
+    const config_data = blk: {
         const path = try resolveConfigPath(allocator, root);
         defer allocator.free(path);
 
         const data = readFileAlloc(allocator, path) catch |err| {
-            if (err == error.FileNotFound) return error.MissingBotToken;
+            if (err == error.FileNotFound) break :blk null;
             return err;
         };
-        defer allocator.free(data);
+        break :blk data;
+    };
+    defer if (config_data) |data| allocator.free(data);
 
-        break :blk try resolveTelegramTokenFromConfig(allocator, data, account);
+    const token = blk: {
+        if (opts.token) |token_arg| {
+            break :blk try allocator.dupe(u8, token_arg);
+        }
+        if (config_data) |data| {
+            break :blk try resolveTelegramTokenFromConfig(allocator, data, account);
+        }
+        return error.MissingBotToken;
     };
     defer allocator.free(token);
 
@@ -1170,6 +1379,11 @@ fn runTelegramGateway(allocator: Allocator, opts: TelegramRunOptions) !void {
     const dispatch = if (opts.zolt) DispatchPlan{} else try parseDispatchPlan(allocator, opts.dispatch);
     defer deinitDispatchPlan(allocator, dispatch);
     const zolt_output_mode = if (opts.zolt) try resolveZoltOutputMode(opts.zolt_output) else DefaultZoltOutputMode;
+    const zolt_selection = if (opts.zolt)
+        try resolveZoltSelectionForAccount(allocator, config_data, account, null, null)
+    else
+        ResolvedZoltSelection{};
+    defer zolt_selection.deinit(allocator);
 
     const zolt_cmd = if (opts.zolt) blk: {
         const zolt_cmd = try resolveZoltCommand(allocator, opts.zolt_command);
@@ -1304,7 +1518,16 @@ fn runTelegramGateway(allocator: Allocator, opts: TelegramRunOptions) !void {
                         token,
                         chat.id,
                         runTelegramThroughZolt,
-                        .{ allocator, root, command, session_key, text, zolt_output_mode },
+                        .{
+                            allocator,
+                            root,
+                            command,
+                            session_key,
+                            text,
+                            zolt_output_mode,
+                            zolt_selection.provider,
+                            zolt_selection.model,
+                        },
                     ) catch |err| {
                         const error_msg = try std.fmt.allocPrint(allocator, "command failed: {s}", .{@errorName(err)});
                         defer allocator.free(error_msg);
@@ -1753,9 +1976,13 @@ fn executeTelegramSlashCommand(
 
     if (isTelegramSlashCommand(command.command, "models")) {
         if (zolt_cmd) |command_bin| {
-            return runZoltModelsCommand(allocator, command_bin);
+            return runZoltModelsForConfiguredProviders(allocator, root, account, command_bin);
         }
         return try allocator.dupe(u8, "models command requires --zolt mode");
+    }
+
+    if (isTelegramSlashCommand(command.command, "model") or isTelegramSlashCommand(command.command, "setmodel")) {
+        return handleTelegramModelSlashCommand(allocator, root, account, command.args);
     }
 
     return try std.fmt.allocPrint(allocator, "unknown command: /{s}. /help for available commands.", .{command.command});
@@ -1918,7 +2145,10 @@ fn renderTelegramSlashHelp(allocator: Allocator) ![]u8 {
             "/sessions - show mapped zolt session\n" ++
             "/status - show runtime status\n" ++
             "/reset - clear mapped zolt session\n" ++
-            "/models - show zolt model info\n",
+            "/models - list models for configured providers\n" ++
+            "/model - show current provider/model for this account\n" ++
+            "/model <provider> <model> - set provider/model for this account\n" ++
+            "/model <model> - set model on current configured provider\n",
     );
 }
 
@@ -1939,6 +2169,170 @@ fn runZoltModelsCommand(allocator: Allocator, zolt_cmd: []const u8) ![]u8 {
         result.stderr,
         result.term,
     );
+}
+
+fn handleTelegramModelSlashCommand(
+    allocator: Allocator,
+    root: []const u8,
+    account: []const u8,
+    args: []const u8,
+) ![]u8 {
+    const config_data = try loadVoltConfigDataIfExists(allocator, root);
+    defer if (config_data) |data| allocator.free(data);
+
+    const trimmed = std.mem.trim(u8, args, " \t\r\n");
+    if (trimmed.len == 0) {
+        const selection = try resolveZoltSelectionForAccount(allocator, config_data, account, null, null);
+        defer selection.deinit(allocator);
+        return std.fmt.allocPrint(
+            allocator,
+            "account: {s}\nprovider: {s}\nmodel: {s}\nuse: /model <provider> <model> or /model <model>",
+            .{
+                account,
+                selection.provider orelse "unset",
+                selection.model orelse "unset",
+            },
+        );
+    }
+
+    const tokens = try parseCommandLineTokens(allocator, trimmed);
+    defer {
+        for (tokens) |token| allocator.free(token);
+        allocator.free(tokens);
+    }
+    if (tokens.len == 0) {
+        return allocator.dupe(u8, "model usage: /model <provider> <model> or /model <model>");
+    }
+    if (tokens.len > 2) {
+        return allocator.dupe(u8, "model usage: /model <provider> <model> or /model <model>");
+    }
+
+    const provider: []const u8 = blk: {
+        if (tokens.len == 2) break :blk tokens[0];
+        const selection = try resolveZoltSelectionForAccount(allocator, config_data, account, null, null);
+        defer selection.deinit(allocator);
+        if (selection.provider) |existing| break :blk existing;
+        return allocator.dupe(u8, "no provider configured for this account; use /model <provider> <model>");
+    };
+    const model = if (tokens.len == 2) tokens[1] else tokens[0];
+
+    try runModelSet(allocator, .{
+        .home_path = root,
+        .account = account,
+        .provider = provider,
+        .model = model,
+    });
+
+    return std.fmt.allocPrint(
+        allocator,
+        "updated model for account {s}\nprovider: {s}\nmodel: {s}",
+        .{ account, provider, model },
+    );
+}
+
+fn runZoltModelsForConfiguredProviders(
+    allocator: Allocator,
+    root: []const u8,
+    account: []const u8,
+    zolt_cmd: []const u8,
+) ![]u8 {
+    const config_data = try loadVoltConfigDataIfExists(allocator, root);
+    defer if (config_data) |data| allocator.free(data);
+
+    const providers = try resolveConfiguredZoltProvidersForAccount(allocator, config_data, account);
+    defer {
+        for (providers) |provider| allocator.free(provider);
+        allocator.free(providers);
+    }
+    if (providers.len == 0) {
+        return std.fmt.allocPrint(
+            allocator,
+            "no configured zolt providers for account {s}; run `volt model set --provider <provider> --model <model>` first",
+            .{account},
+        );
+    }
+
+    var out = std.ArrayListUnmanaged(u8){};
+    defer out.deinit(allocator);
+
+    for (providers, 0..) |provider, index| {
+        if (index > 0) try out.appendSlice(allocator, "\n\n");
+        try out.appendSlice(allocator, "provider ");
+        try out.appendSlice(allocator, provider);
+        try out.appendSlice(allocator, ":\n");
+
+        const rendered = try runZoltModelsCommandForProvider(allocator, zolt_cmd, provider);
+        defer allocator.free(rendered);
+        try out.appendSlice(allocator, rendered);
+    }
+
+    return out.toOwnedSlice(allocator);
+}
+
+fn runZoltModelsCommandForProvider(
+    allocator: Allocator,
+    zolt_cmd: []const u8,
+    provider: []const u8,
+) ![]u8 {
+    const argv = [_][]const u8{ zolt_cmd, "models", "--provider", provider };
+    const result = try std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &argv,
+    });
+    defer {
+        allocator.free(result.stdout);
+        allocator.free(result.stderr);
+    }
+
+    return composeChildOutput(
+        allocator,
+        result.stdout,
+        result.stderr,
+        result.term,
+    );
+}
+
+fn resolveConfiguredZoltProvidersForAccount(
+    allocator: Allocator,
+    config_data: ?[]const u8,
+    account: []const u8,
+) ![][]u8 {
+    var providers = std.ArrayListUnmanaged([]u8){};
+    errdefer {
+        for (providers.items) |provider| allocator.free(provider);
+        providers.deinit(allocator);
+    }
+
+    const data = config_data orelse return providers.toOwnedSlice(allocator);
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, data, .{ .ignore_unknown_fields = true }) catch {
+        return providers.toOwnedSlice(allocator);
+    };
+    defer parsed.deinit();
+
+    const root = &parsed.value;
+    if (resolveZoltAccountConfig(allocator, root, account)) |account_cfg| {
+        if (resolveJsonStringField(account_cfg, &.{"provider"})) |provider| {
+            try appendUniqueProvider(allocator, &providers, provider);
+        }
+    }
+    if (resolveJsonStringField(root, &.{ "zolt", "provider" })) |provider| {
+        try appendUniqueProvider(allocator, &providers, provider);
+    }
+
+    return providers.toOwnedSlice(allocator);
+}
+
+fn appendUniqueProvider(
+    allocator: Allocator,
+    providers: *std.ArrayListUnmanaged([]u8),
+    provider_raw: []const u8,
+) !void {
+    const provider = std.mem.trim(u8, provider_raw, " \t\r\n");
+    if (provider.len == 0) return;
+    for (providers.items) |existing| {
+        if (std.mem.eql(u8, existing, provider)) return;
+    }
+    try providers.append(allocator, try allocator.dupe(u8, provider));
 }
 
 fn registerTelegramCommands(allocator: Allocator, client: *std.http.Client, token: []const u8) !void {
@@ -2087,6 +2481,77 @@ fn resolveBundledZoltCommand(allocator: Allocator) ?[]u8 {
 
 fn defaultZoltBinaryName() []const u8 {
     return if (builtin.os.tag == .windows) "zolt.exe" else "zolt";
+}
+
+fn parseModelSetOptions(args: []const []const u8) !ModelSetOptions {
+    var result = ModelSetOptions{
+        .home_path = null,
+        .account = null,
+        .provider = null,
+        .model = null,
+    };
+
+    var idx: usize = 0;
+    while (idx < args.len) : (idx += 1) {
+        const arg = args[idx];
+        if (std.mem.eql(u8, arg, "--home")) {
+            if (idx + 1 >= args.len) return error.UnexpectedArgument;
+            result.home_path = args[idx + 1];
+            idx += 1;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--account")) {
+            if (idx + 1 >= args.len) return error.UnexpectedArgument;
+            result.account = args[idx + 1];
+            idx += 1;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--provider")) {
+            if (idx + 1 >= args.len) return error.UnexpectedArgument;
+            result.provider = args[idx + 1];
+            idx += 1;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--model")) {
+            if (idx + 1 >= args.len) return error.UnexpectedArgument;
+            result.model = args[idx + 1];
+            idx += 1;
+            continue;
+        }
+        return error.UnknownArgument;
+    }
+
+    if (result.provider == null or result.model == null) {
+        return error.UnexpectedArgument;
+    }
+    return result;
+}
+
+fn parseModelShowOptions(args: []const []const u8) !ModelShowOptions {
+    var result = ModelShowOptions{
+        .home_path = null,
+        .account = null,
+    };
+
+    var idx: usize = 0;
+    while (idx < args.len) : (idx += 1) {
+        const arg = args[idx];
+        if (std.mem.eql(u8, arg, "--home")) {
+            if (idx + 1 >= args.len) return error.UnexpectedArgument;
+            result.home_path = args[idx + 1];
+            idx += 1;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--account")) {
+            if (idx + 1 >= args.len) return error.UnexpectedArgument;
+            result.account = args[idx + 1];
+            idx += 1;
+            continue;
+        }
+        return error.UnknownArgument;
+    }
+
+    return result;
 }
 
 fn parseTelegramSetupOptions(allocator: Allocator, args: []const []const u8) !TelegramSetupOptions {
@@ -2421,6 +2886,8 @@ fn runTelegramList(allocator: Allocator, opts: TelegramListOptions) !void {
 
     for (accounts.items) |account| {
         const token_configured = try hasTelegramTokenForAccount(allocator, config_data, account);
+        const zolt_selection = try resolveZoltSelectionForAccount(allocator, config_data, account, null, null);
+        defer zolt_selection.deinit(allocator);
         const mapped_chats = try countMappedChatsForAccount(allocator, root, account);
         const mapped_text = try formatUnsignedWithCommas(allocator, mapped_chats);
         defer allocator.free(mapped_text);
@@ -2434,6 +2901,18 @@ fn runTelegramList(allocator: Allocator, opts: TelegramListOptions) !void {
         }
         try out.appendSlice(allocator, " token=");
         try out.appendSlice(allocator, if (token_configured) "configured" else "missing");
+        try out.appendSlice(allocator, " provider=");
+        if (zolt_selection.provider) |provider| {
+            try out.appendSlice(allocator, provider);
+        } else {
+            try out.appendSlice(allocator, "default");
+        }
+        try out.appendSlice(allocator, " model=");
+        if (zolt_selection.model) |model| {
+            try out.appendSlice(allocator, model);
+        } else {
+            try out.appendSlice(allocator, "default");
+        }
         try out.appendSlice(allocator, " mapped-chats=");
         try out.appendSlice(allocator, mapped_text);
         try out.appendSlice(allocator, "\n");
@@ -3525,6 +4004,17 @@ fn resolveConfigPath(allocator: Allocator, home_root: []const u8) ![]u8 {
     return try resolveExpandedPath(allocator, config_path, home);
 }
 
+fn loadVoltConfigDataIfExists(allocator: Allocator, home_root: []const u8) !?[]u8 {
+    const config_path = try resolveConfigPath(allocator, home_root);
+    defer allocator.free(config_path);
+
+    const data = readFileAlloc(allocator, config_path) catch |err| switch (err) {
+        error.FileNotFound => return null,
+        else => return err,
+    };
+    return data;
+}
+
 fn joinPath(allocator: Allocator, base: []const u8, rel: []const u8) ![]u8 {
     return std.fmt.allocPrint(allocator, "{s}/{s}", .{ base, rel });
 }
@@ -3587,19 +4077,20 @@ fn renderVoltConfig(
     account_id: ?[]const u8,
 ) ![]u8 {
     if (template_text) |template| {
-        const parsed = std.json.parseFromSlice(std.json.Value, allocator, template, .{}) catch {
+        var parsed = std.json.parseFromSlice(std.json.Value, allocator, template, .{}) catch {
             return try renderVoltSeedConfig(allocator, token, workspace, account_id);
         };
         defer parsed.deinit();
 
-        var root = parsed.value;
-        try patchVoltValue(allocator, &root, token, workspace, account_id);
+        const root = &parsed.value;
+        const json_allocator = parsed.arena.allocator();
+        try patchVoltValue(json_allocator, root, token, workspace, account_id);
 
         var out = std.Io.Writer.Allocating.init(allocator);
         defer out.deinit();
 
         var stringify = std.json.Stringify{ .writer = &out.writer, .options = .{} };
-        try stringify.write(root);
+        try stringify.write(root.*);
         return out.toOwnedSlice();
     }
 
@@ -3635,14 +4126,15 @@ fn renderVoltSeedConfig(
     );
     defer parsed.deinit();
 
-    var root = parsed.value;
-    try patchVoltValue(allocator, &root, token, workspace, account_id);
+    const root = &parsed.value;
+    const json_allocator = parsed.arena.allocator();
+    try patchVoltValue(json_allocator, root, token, workspace, account_id);
 
     var rewritten = std.Io.Writer.Allocating.init(allocator);
     defer rewritten.deinit();
 
     stringify = std.json.Stringify{ .writer = &rewritten.writer, .options = .{} };
-    try stringify.write(root);
+    try stringify.write(root.*);
     return rewritten.toOwnedSlice();
 }
 
@@ -3784,6 +4276,8 @@ fn runTelegramThroughZolt(
     session_key: []const u8,
     message: []const u8,
     zolt_output_mode: []const u8,
+    zolt_provider: ?[]const u8,
+    zolt_model: ?[]const u8,
 ) ![]u8 {
     const existing_session_id = blk: {
         break :blk loadTelegramZoltSessionId(allocator, root, session_key) catch |err| {
@@ -3800,6 +4294,8 @@ fn runTelegramThroughZolt(
             mapped_session,
             message,
             zolt_output_mode,
+            zolt_provider,
+            zolt_model,
         );
         if (!isZoltSessionNotFound(mapped_output)) {
             if (!isZoltTextOutputMode(zolt_output_mode)) {
@@ -3850,6 +4346,8 @@ fn runTelegramThroughZolt(
         null,
         bootstrap_message,
         bootstrap_output_mode,
+        zolt_provider,
+        zolt_model,
     );
     defer allocator.free(session_output);
     const parsed = parseZoltRunJson(allocator, session_output) catch |err| {
@@ -4090,6 +4588,8 @@ fn runZoltCommandForMessageWithRetry(
     session_id: ?[]const u8,
     message: []const u8,
     output_mode: []const u8,
+    provider: ?[]const u8,
+    model: ?[]const u8,
 ) ![]u8 {
     const first_output = try runZoltCommandForMessage(
         allocator,
@@ -4097,6 +4597,8 @@ fn runZoltCommandForMessageWithRetry(
         session_id,
         message,
         output_mode,
+        provider,
+        model,
     );
     if (!isZoltProviderPingFailureOutput(first_output)) return first_output;
 
@@ -4110,6 +4612,8 @@ fn runZoltCommandForMessageWithRetry(
         session_id,
         message,
         output_mode,
+        provider,
+        model,
     ) catch |err| {
         debugPrint(allocator, "zolt retry failed to execute: {s}", .{@errorName(err)});
         return first_output;
@@ -4129,12 +4633,22 @@ fn runZoltCommandForMessage(
     session_id: ?[]const u8,
     message: []const u8,
     output_mode: []const u8,
+    provider: ?[]const u8,
+    model: ?[]const u8,
 ) ![]u8 {
     var argv = std.ArrayListUnmanaged([]const u8){};
     defer argv.deinit(allocator);
 
     try argv.append(allocator, zolt_command);
     try argv.append(allocator, "run");
+    if (provider) |provider_id| {
+        try argv.append(allocator, "--provider");
+        try argv.append(allocator, provider_id);
+    }
+    if (model) |model_id| {
+        try argv.append(allocator, "--model");
+        try argv.append(allocator, model_id);
+    }
     if (session_id) |session| {
         try argv.append(allocator, "--session");
         try argv.append(allocator, session);
@@ -4899,6 +5413,113 @@ fn resolveTelegramAccountConfig(
     return null;
 }
 
+fn resolveZoltAccountConfig(
+    allocator: Allocator,
+    root: *const std.json.Value,
+    account: []const u8,
+) ?*const std.json.Value {
+    const accounts_path = [_][]const u8{ "zolt", "accounts" };
+    const accounts_value = resolveJsonValue(root, accounts_path[0..]) orelse return null;
+    if (accounts_value.* != .object) {
+        return null;
+    }
+
+    if (accounts_value.object.getPtr(account)) |direct| {
+        return direct;
+    }
+
+    var it = accounts_value.object.iterator();
+    while (it.next()) |entry| {
+        const normalized_key = normalizeAccountId(allocator, entry.key_ptr.*) catch continue;
+        defer allocator.free(normalized_key);
+        if (std.mem.eql(u8, normalized_key, account)) {
+            return entry.value_ptr;
+        }
+    }
+
+    return null;
+}
+
+const ResolvedZoltSelection = struct {
+    provider: ?[]u8 = null,
+    model: ?[]u8 = null,
+
+    fn deinit(self: ResolvedZoltSelection, allocator: Allocator) void {
+        if (self.provider) |value| allocator.free(value);
+        if (self.model) |value| allocator.free(value);
+    }
+};
+
+fn resolveZoltSelectionForAccount(
+    allocator: Allocator,
+    config_data: ?[]const u8,
+    account: []const u8,
+    explicit_provider: ?[]const u8,
+    explicit_model: ?[]const u8,
+) !ResolvedZoltSelection {
+    var result = ResolvedZoltSelection{};
+
+    const explicit_provider_trimmed = std.mem.trim(u8, explicit_provider orelse "", " \t\r\n");
+    if (explicit_provider_trimmed.len > 0) {
+        result.provider = try allocator.dupe(u8, explicit_provider_trimmed);
+    }
+
+    const explicit_model_trimmed = std.mem.trim(u8, explicit_model orelse "", " \t\r\n");
+    if (explicit_model_trimmed.len > 0) {
+        result.model = try allocator.dupe(u8, explicit_model_trimmed);
+    }
+
+    if ((result.provider == null or result.model == null) and config_data != null) {
+        const parsed = std.json.parseFromSlice(std.json.Value, allocator, config_data.?, .{ .ignore_unknown_fields = true }) catch null;
+        if (parsed) |parsed_cfg| {
+            defer parsed_cfg.deinit();
+            const root = &parsed_cfg.value;
+
+            if (resolveZoltAccountConfig(allocator, root, account)) |account_cfg| {
+                if (result.provider == null) {
+                    if (resolveJsonStringField(account_cfg, &.{"provider"})) |provider| {
+                        const trimmed = std.mem.trim(u8, provider, " \t\r\n");
+                        if (trimmed.len > 0) {
+                            result.provider = try allocator.dupe(u8, trimmed);
+                        }
+                    }
+                }
+                if (result.model == null) {
+                    if (resolveJsonStringField(account_cfg, &.{"model"})) |model| {
+                        const trimmed = std.mem.trim(u8, model, " \t\r\n");
+                        if (trimmed.len > 0) {
+                            result.model = try allocator.dupe(u8, trimmed);
+                        }
+                    }
+                }
+            }
+
+            if (result.provider == null) {
+                if (resolveJsonStringField(root, &.{ "zolt", "provider" })) |provider| {
+                    const trimmed = std.mem.trim(u8, provider, " \t\r\n");
+                    if (trimmed.len > 0) {
+                        result.provider = try allocator.dupe(u8, trimmed);
+                    }
+                }
+            }
+            if (result.model == null) {
+                if (resolveJsonStringField(root, &.{ "zolt", "model" })) |model| {
+                    const trimmed = std.mem.trim(u8, model, " \t\r\n");
+                    if (trimmed.len > 0) {
+                        result.model = try allocator.dupe(u8, trimmed);
+                    }
+                }
+            }
+        }
+    }
+
+    if (result.model != null and result.provider == null) {
+        return VoltError.ZoltProviderRequiredForModel;
+    }
+
+    return result;
+}
+
 fn resolveTelegramTokenFromConfig(
     allocator: Allocator,
     data: []const u8,
@@ -5532,7 +6153,11 @@ test "parseGatewayOptions parses all supported args" {
 }
 
 test "parseGatewayOptions supports --zolt and enforces exclusivity" {
-    const opts = try parseGatewayOptions(&.{ "--zolt", "--zolt-path", "/usr/local/bin/zolt" });
+    const opts = try parseGatewayOptions(&.{
+        "--zolt",
+        "--zolt-path",
+        "/usr/local/bin/zolt",
+    });
     try testing.expect(opts.zolt);
     try testing.expect(opts.dispatch == null);
     try testing.expectEqualStrings("/usr/local/bin/zolt", opts.zolt_command.?);
@@ -5556,6 +6181,17 @@ test "parseGatewayOptions supports --zolt-output" {
     try testing.expect(opts.zolt);
     try testing.expect(opts.zolt_output != null);
     try testing.expectEqualStrings("logs", opts.zolt_output.?);
+}
+
+test "parseGatewayOptions rejects removed model flags" {
+    try testing.expectError(
+        error.UnknownArgument,
+        parseGatewayOptions(&.{ "--zolt-provider", "openai" }),
+    );
+    try testing.expectError(
+        error.UnknownArgument,
+        parseGatewayOptions(&.{ "--zolt-model", "gpt-5-chat-latest" }),
+    );
 }
 
 test "parseGatewayOptions normalizes output mode casing and rejects invalid values" {
@@ -5705,6 +6341,25 @@ test "buildTelegramLaunchdPlist includes configured arguments" {
     try testing.expect(std.mem.indexOf(u8, plist, "<string>4000</string>") != null);
 }
 
+test "buildTelegramLaunchdPlist omits zolt provider/model arguments" {
+    const allocator = testing.allocator;
+    const opts = try parseTelegramRunOptions(&.{
+        "--home",
+        "/tmp/volt",
+        "--zolt",
+        "--zolt-output",
+        "json",
+        "--poll-ms",
+        "4000",
+    });
+
+    const plist = try buildTelegramLaunchdPlist(allocator, "/usr/local/bin/volt", opts);
+    defer allocator.free(plist);
+
+    try testing.expect(std.mem.indexOf(u8, plist, "<string>--zolt-provider</string>") == null);
+    try testing.expect(std.mem.indexOf(u8, plist, "<string>--zolt-model</string>") == null);
+}
+
 test "parseGatewayRoute recognizes supported paths" {
     try testing.expect(parseGatewayRoute("/health") == .health);
     try testing.expect(parseGatewayRoute("/gateway/health") == .health);
@@ -5757,7 +6412,11 @@ test "parseTelegramRunOptions supports --zolt flag" {
 }
 
 test "parseTelegramRunOptions supports --zolt-output" {
-    const opts = try parseTelegramRunOptions(&.{ "--zolt", "--zolt-output", "json-stream" });
+    const opts = try parseTelegramRunOptions(&.{
+        "--zolt",
+        "--zolt-output",
+        "json-stream",
+    });
     try testing.expect(opts.zolt);
     try testing.expect(opts.zolt_output != null);
     try testing.expectEqualStrings("json-stream", opts.zolt_output.?);
@@ -5771,7 +6430,11 @@ test "parseTelegramRunOptions rejects invalid output mode" {
 }
 
 test "parseTelegramRunOptions supports --zolt-path" {
-    const opts = try parseTelegramRunOptions(&.{ "--zolt", "--zolt-path", "/usr/local/bin/zolt" });
+    const opts = try parseTelegramRunOptions(&.{
+        "--zolt",
+        "--zolt-path",
+        "/usr/local/bin/zolt",
+    });
     try testing.expect(opts.zolt);
     try testing.expect(opts.zolt_command != null);
     try testing.expectEqualStrings("/usr/local/bin/zolt", opts.zolt_command.?);
@@ -5781,6 +6444,17 @@ test "parseTelegramRunOptions rejects --zolt combined with --dispatch" {
     try testing.expectError(
         error.UnexpectedArgument,
         parseTelegramRunOptions(&.{ "--zolt", "--dispatch", "zolt --message {message}" }),
+    );
+}
+
+test "parseTelegramRunOptions rejects removed model flags" {
+    try testing.expectError(
+        error.UnknownArgument,
+        parseTelegramRunOptions(&.{ "--zolt-provider", "openai" }),
+    );
+    try testing.expectError(
+        error.UnknownArgument,
+        parseTelegramRunOptions(&.{ "--zolt", "--zolt-model", "gpt-5-chat-latest" }),
     );
 }
 
@@ -5924,12 +6598,113 @@ test "parseTelegramSetupOptions deduplicates allow-from entries" {
     try testing.expectEqualStrings("333", opts.allow_from.items[2]);
 }
 
+test "parseModelSetOptions validates required flags" {
+    const opts = try parseModelSetOptions(&.{
+        "--provider",
+        "openai",
+        "--model",
+        "gpt-5-chat-latest",
+        "--account",
+        "Work Team",
+        "--home",
+        "/tmp/volt",
+    });
+
+    try testing.expectEqualStrings("openai", opts.provider.?);
+    try testing.expectEqualStrings("gpt-5-chat-latest", opts.model.?);
+    try testing.expectEqualStrings("Work Team", opts.account.?);
+    try testing.expectEqualStrings("/tmp/volt", opts.home_path.?);
+
+    try testing.expectError(
+        error.UnexpectedArgument,
+        parseModelSetOptions(&.{ "--provider", "openai" }),
+    );
+    try testing.expectError(
+        error.UnknownArgument,
+        parseModelSetOptions(&.{ "--provider", "openai", "--model", "gpt-5-chat-latest", "--bad" }),
+    );
+}
+
+test "parseModelShowOptions parses home and account" {
+    const opts = try parseModelShowOptions(&.{ "--account", "work", "--home", "/tmp/volt" });
+    try testing.expectEqualStrings("work", opts.account.?);
+    try testing.expectEqualStrings("/tmp/volt", opts.home_path.?);
+    try testing.expectError(error.UnknownArgument, parseModelShowOptions(&.{"--bad"}));
+}
+
+test "runModelSet writes default and account-scoped config" {
+    const allocator = testing.allocator;
+    const root = try std.fmt.allocPrint(allocator, "/tmp/volt-model-set-{d}", .{std.time.milliTimestamp()});
+    defer allocator.free(root);
+    try std.fs.makeDirAbsolute(root);
+    defer std.fs.deleteTreeAbsolute(root) catch {};
+
+    try runModelSet(allocator, .{
+        .home_path = root,
+        .account = null,
+        .provider = "openai",
+        .model = "gpt-5-chat-latest",
+    });
+    try runModelSet(allocator, .{
+        .home_path = root,
+        .account = "Work Team",
+        .provider = "opencode",
+        .model = "claude-sonnet-4-6",
+    });
+
+    const config_path = try joinPath(allocator, root, "volt.json");
+    defer allocator.free(config_path);
+    const data = try readFileAlloc(allocator, config_path);
+    defer allocator.free(data);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, data, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+    const root_value = &parsed.value;
+
+    try testing.expectEqualStrings(
+        "openai",
+        resolveJsonStringField(root_value, &.{ "zolt", "provider" }).?,
+    );
+    try testing.expectEqualStrings(
+        "gpt-5-chat-latest",
+        resolveJsonStringField(root_value, &.{ "zolt", "model" }).?,
+    );
+    try testing.expectEqualStrings(
+        "opencode",
+        resolveJsonStringField(root_value, &.{ "zolt", "accounts", "work-team", "provider" }).?,
+    );
+    try testing.expectEqualStrings(
+        "claude-sonnet-4-6",
+        resolveJsonStringField(root_value, &.{ "zolt", "accounts", "work-team", "model" }).?,
+    );
+}
+
 test "parseTelegramListOptions parses home and account" {
     const opts = try parseTelegramListOptions(&.{ "--home", "/tmp/volt", "--account", "Work Team" });
     try testing.expectEqualStrings("/tmp/volt", opts.home_path.?);
     try testing.expectEqualStrings("Work Team", opts.account.?);
 
     try testing.expectError(error.UnknownArgument, parseTelegramListOptions(&.{"--bad"}));
+}
+
+test "resolveZoltSelectionForAccount uses account then global defaults" {
+    const allocator = testing.allocator;
+    const config =
+        "{" ++ "\"zolt\":{" ++ "\"provider\":\"openai\"," ++ "\"model\":\"gpt-5-chat-latest\"," ++ "\"accounts\":{" ++ "\"work\":{\"provider\":\"opencode\",\"model\":\"claude-sonnet-4-6\"}" ++ "}" ++ "}" ++ "}";
+
+    const selection_work = try resolveZoltSelectionForAccount(allocator, config, "work", null, null);
+    defer selection_work.deinit(allocator);
+    try testing.expect(selection_work.provider != null);
+    try testing.expect(selection_work.model != null);
+    try testing.expectEqualStrings("opencode", selection_work.provider.?);
+    try testing.expectEqualStrings("claude-sonnet-4-6", selection_work.model.?);
+
+    const selection_default = try resolveZoltSelectionForAccount(allocator, config, DefaultAccountId, null, null);
+    defer selection_default.deinit(allocator);
+    try testing.expect(selection_default.provider != null);
+    try testing.expect(selection_default.model != null);
+    try testing.expectEqualStrings("openai", selection_default.provider.?);
+    try testing.expectEqualStrings("gpt-5-chat-latest", selection_default.model.?);
 }
 
 test "parseTelegramRunOptions rejects --zolt-path without --zolt" {
@@ -6097,6 +6872,121 @@ test "executeTelegramSlashCommand can render status and clear sessions" {
     );
     defer allocator.free(response_sessions_after_reset);
     try testing.expect(std.mem.eql(u8, response_sessions_after_reset, "chat 111 has no active zolt session"));
+}
+
+test "renderTelegramSlashCommands includes model controls" {
+    const allocator = testing.allocator;
+    const commands = try renderTelegramSlashCommands(allocator);
+    defer allocator.free(commands);
+
+    try testing.expect(std.mem.indexOf(u8, commands, "/models") != null);
+    try testing.expect(std.mem.indexOf(u8, commands, "/model") != null);
+}
+
+test "executeTelegramSlashCommand model sets and reads config for account" {
+    const allocator = testing.allocator;
+    const root = try std.fmt.allocPrint(allocator, "/tmp/volt-slash-model-test-{d}", .{std.time.milliTimestamp()});
+    defer allocator.free(root);
+
+    try std.fs.makeDirAbsolute(root);
+    defer std.fs.deleteTreeAbsolute(root) catch {};
+
+    const set_result = try executeTelegramSlashCommand(
+        allocator,
+        .{ .command = "model", .args = "openai gpt-5-chat-latest" },
+        root,
+        "telegram:work:111",
+        "work",
+        111,
+        "zolt",
+    );
+    defer allocator.free(set_result);
+    try testing.expect(std.mem.indexOf(u8, set_result, "provider: openai") != null);
+    try testing.expect(std.mem.indexOf(u8, set_result, "model: gpt-5-chat-latest") != null);
+
+    const show_result = try executeTelegramSlashCommand(
+        allocator,
+        .{ .command = "model", .args = "" },
+        root,
+        "telegram:work:111",
+        "work",
+        111,
+        "zolt",
+    );
+    defer allocator.free(show_result);
+    try testing.expect(std.mem.indexOf(u8, show_result, "provider: openai") != null);
+    try testing.expect(std.mem.indexOf(u8, show_result, "model: gpt-5-chat-latest") != null);
+
+    const config_path = try joinPath(allocator, root, "volt.json");
+    defer allocator.free(config_path);
+    const data = try readFileAlloc(allocator, config_path);
+    defer allocator.free(data);
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, data, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+
+    try testing.expectEqualStrings(
+        "openai",
+        resolveJsonStringField(&parsed.value, &.{ "zolt", "accounts", "work", "provider" }).?,
+    );
+    try testing.expectEqualStrings(
+        "gpt-5-chat-latest",
+        resolveJsonStringField(&parsed.value, &.{ "zolt", "accounts", "work", "model" }).?,
+    );
+}
+
+test "executeTelegramSlashCommand models lists only configured providers" {
+    const allocator = testing.allocator;
+    const root = try std.fmt.allocPrint(allocator, "/tmp/volt-slash-models-test-{d}", .{std.time.milliTimestamp()});
+    defer allocator.free(root);
+
+    try std.fs.makeDirAbsolute(root);
+    defer std.fs.deleteTreeAbsolute(root) catch {};
+
+    try runModelSet(allocator, .{
+        .home_path = root,
+        .account = null,
+        .provider = "openai",
+        .model = "gpt-5-chat-latest",
+    });
+    try runModelSet(allocator, .{
+        .home_path = root,
+        .account = "work",
+        .provider = "opencode",
+        .model = "claude-sonnet-4-6",
+    });
+
+    const script_path = try joinPath(allocator, root, "mock-zolt-models.sh");
+    defer allocator.free(script_path);
+    var script = try std.fs.createFileAbsolute(script_path, .{
+        .truncate = true,
+        .mode = 0o755,
+    });
+    try script.writeAll(
+        \\#!/bin/sh
+        \\if [ "$1" = "models" ] && [ "$2" = "--provider" ]; then
+        \\  printf "provider=%s\n" "$3"
+        \\  exit 0
+        \\fi
+        \\printf "bad-args:%s %s %s\n" "$1" "$2" "$3"
+    );
+    script.close();
+
+    const result = try executeTelegramSlashCommand(
+        allocator,
+        .{ .command = "models", .args = "" },
+        root,
+        "telegram:work:222",
+        "work",
+        222,
+        script_path,
+    );
+    defer allocator.free(result);
+
+    try testing.expect(std.mem.indexOf(u8, result, "provider opencode:") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "provider openai:") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "provider=opencode") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "provider=openai") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "bad-args:") == null);
 }
 
 test "executeTelegramSlashCommand status includes provider model and token usage" {
@@ -6556,7 +7446,7 @@ test "runTelegramThroughZolt bootstraps and reuses zolt sessions" {
     script.close();
 
     const session_key = "telegram:default:1111";
-    const response_one = try runTelegramThroughZolt(allocator, root, zolt_command, session_key, "hello", "json");
+    const response_one = try runTelegramThroughZolt(allocator, root, zolt_command, session_key, "hello", "json", null, null);
     defer allocator.free(response_one);
     try testing.expectEqualStrings("bootstrap-with-context", response_one);
 
@@ -6565,12 +7455,12 @@ test "runTelegramThroughZolt bootstraps and reuses zolt sessions" {
     try testing.expect(session_one != null);
     try testing.expect(std.mem.startsWith(u8, session_one.?, "session_"));
 
-    const response_two = try runTelegramThroughZolt(allocator, root, zolt_command, session_key, "again", "json");
+    const response_two = try runTelegramThroughZolt(allocator, root, zolt_command, session_key, "again", "json", null, null);
     defer allocator.free(response_two);
     try testing.expect(std.mem.indexOf(u8, response_two, "reuse:") != null);
 
     try persistTelegramZoltSessionId(allocator, root, session_key, "stale");
-    const response_three = try runTelegramThroughZolt(allocator, root, zolt_command, session_key, "fixed", "json");
+    const response_three = try runTelegramThroughZolt(allocator, root, zolt_command, session_key, "fixed", "json", null, null);
     defer allocator.free(response_three);
     try testing.expectEqualStrings("bootstrap-with-context", response_three);
 
@@ -6578,4 +7468,41 @@ test "runTelegramThroughZolt bootstraps and reuses zolt sessions" {
     defer if (session_three) |session| allocator.free(session);
     try testing.expect(session_three != null);
     try testing.expect(!std.mem.eql(u8, session_three.?, "stale"));
+}
+
+test "runZoltCommandForMessage includes provider/model flags" {
+    const allocator = testing.allocator;
+    const root = try std.fmt.allocPrint(allocator, "/tmp/volt-zolt-argv-test-{d}", .{std.time.milliTimestamp()});
+    defer allocator.free(root);
+    try std.fs.makeDirAbsolute(root);
+    defer std.fs.deleteTreeAbsolute(root) catch {};
+
+    const script_path = try joinPath(allocator, root, "mock-zolt.sh");
+    defer allocator.free(script_path);
+    const script_body =
+        \\#!/bin/sh
+        \\printf "%s " "$@"
+    ;
+    var script = try std.fs.createFileAbsolute(script_path, .{
+        .truncate = true,
+        .mode = 0o755,
+    });
+    try script.writeAll(script_body);
+    script.close();
+
+    const output = try runZoltCommandForMessage(
+        allocator,
+        script_path,
+        "session-123",
+        "hello world",
+        "json",
+        "openai",
+        "gpt-5-chat-latest",
+    );
+    defer allocator.free(output);
+
+    try testing.expect(std.mem.indexOf(u8, output, "--provider openai") != null);
+    try testing.expect(std.mem.indexOf(u8, output, "--model gpt-5-chat-latest") != null);
+    try testing.expect(std.mem.indexOf(u8, output, "--session session-123") != null);
+    try testing.expect(std.mem.indexOf(u8, output, "--output json") != null);
 }

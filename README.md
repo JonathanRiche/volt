@@ -39,7 +39,7 @@ By default, Volt uses `~/.volt` as the workspace root (or `--home`).
 Initialize workspace layout with:
 
 ```bash
-volt init --home ~/.volt
+volt init
 ```
 This creates `volt.json` and seeds default markdown guidance files for the first-run bootstrap:
 `AGENTS.md`, `BOOTSTRAP.md`, `SOUL.md`, `TOOLS.md`, `IDENTITY.md`, `USER.md`, and `HEARTBEAT.md`.
@@ -49,7 +49,15 @@ This creates `volt.json` and seeds default markdown guidance files for the first
 Use token-only setup:
 
 ```bash
-volt telegram setup --home ~/.volt --token "<bot_token>"
+volt telegram setup --token "<bot_token>"
+```
+
+Set zolt defaults (global or account-scoped) with dedicated model commands:
+
+```bash
+volt model set --provider openai --model gpt-5-chat-latest
+volt model set --account work --provider opencode --model claude-sonnet-4-6
+volt model show --account work
 ```
 
 `--allow-from` is optional. If omitted, Volt allows all chats to use the bot.
@@ -62,19 +70,19 @@ No `--chat-id` is needed for setup; chat ids are discovered from incoming Telegr
 2. Initialize Volt workspace:
 
 ```bash
-volt init --home ~/.volt
+volt init
 ```
 
 3. Save the token:
 
 ```bash
-volt telegram setup --home ~/.volt --token "<bot_token>"
+volt telegram setup --token "<bot_token>"
 ```
 
 4. Run Telegram polling in foreground:
 
 ```bash
-volt --telegram --home ~/.volt --zolt --account default
+volt --telegram --zolt
 ```
 
 5. Send a message to your bot in Telegram and run `/status` to confirm the active session/model.
@@ -82,13 +90,17 @@ volt --telegram --home ~/.volt --zolt --account default
 6. Optional daemon mode (keeps Volt running in background):
 
 ```bash
-volt telegram install --home ~/.volt --zolt --account default
-volt telegram status --home ~/.volt --account default
+volt telegram install --zolt
+volt telegram status
 ```
 
 Use `volt telegram restart ...`, `volt telegram stop ...`, and `volt telegram uninstall ...` to manage it later.
 
-Volt also registers a Telegram slash-command menu (`/help`, `/commands`, `/sessions`, `/status`, `/reset`, `/models`) when the gateway starts, so you can discover commands in the Telegram UI.
+When `--zolt` is enabled, Volt resolves provider/model from config in this order:
+1. account config in `volt.json` (`zolt.accounts.<account>.provider/model`)
+2. global config in `volt.json` (`zolt.provider/model`)
+
+Volt also registers a Telegram slash-command menu (`/help`, `/commands`, `/sessions`, `/status`, `/reset`, `/models`, `/model`) when the gateway starts, so you can discover commands in the Telegram UI.
 
 Volt can render Telegram responses with Markdown formatting when the reply contains markdown markers (lists, headings, backticks, links, fences).
 If Telegram rejects Markdown for a response, Volt automatically retries as plain text.
@@ -100,7 +112,8 @@ In Telegram, send:
 - `/sessions` to show the mapped zolt session for this chat
 - `/status` to show runtime details, including last provider/model, token usage, context-left estimate, and compaction count when available from zolt JSON output
 - `/reset` to clear the mapped zolt session
-- `/models` to run the zolt model command (requires `--zolt`)
+- `/models` to list models for configured providers only (requires `--zolt`)
+- `/model` to show/set provider+model for the current account (`/model <provider> <model>` or `/model <model>`)
 
 To get your chat id, send a message to the bot and inspect `chat.id` from:
 
@@ -111,7 +124,7 @@ curl -s "https://api.telegram.org/bot<TOKEN>/getUpdates"
 Enable debug tracing when needed:
 
 ```bash
-VOLT_DEBUG=1 volt --telegram --home ~/.volt --zolt
+VOLT_DEBUG=1 volt --telegram --zolt
 ```
 
 Debug output prints the exact zolt command line and stdout/stderr snippets in stderr.
@@ -134,7 +147,7 @@ Commands:
 - `restart`: restarts a service.
 - `status`: prints current service status using the native OS service manager.
 - `uninstall`: stops and removes the service definition.
-- `list`: shows configured accounts, mapped chat counts, and which account the service is currently bound to.
+- `list`: shows configured accounts, token/model/provider defaults, mapped chat counts, and which account the service is currently bound to.
 
 Volt can bundle a local `zolt` checkout so `--zolt` can run without a preinstalled system `zolt` binary. When bundling is enabled, Volt prefers:
 
@@ -148,6 +161,13 @@ Options:
 - `-Dzolt-dependency=<name>` to override the dependency key in `build.zig.zon` (defaults to `zolt`).
 - `--zolt-path` flag or `VOLT_ZOLT_PATH` env var still override any bundled executable.
 
+Set provider/model defaults with:
+
+```bash
+volt model set --provider <provider> --model <model> [--account <id>] [--home <path>]
+volt model show [--account <id>] [--home <path>]
+```
+
 If you want to refresh the zolt package hash yourself:
 
 ```bash
@@ -157,7 +177,7 @@ zig fetch --save git+https://github.com/JonathanRiche/zolt
 ## Gateway mode quick start
 
 ```bash
-zig build run -- gateway --home ~/.volt --port 18789 --zolt
+zig build run -- gateway --port 18789 --zolt
 ```
 
 Then send a POST to:
@@ -193,8 +213,8 @@ Gateway session IDs are resolved as:
 Volt can manage the gateway as a background service:
 
 ```bash
-volt gateway install [--home <path>] [--bind <ip>] [--port <port>] [--account <id>] [--dispatch <command>] [--zolt] [--zolt-path <path>] [--auth-token <token>]
-volt gateway start|stop|restart|status|uninstall [--home <path>] [--bind <ip>] [--port <port>] [--account <id>] [--dispatch <command>] [--zolt] [--zolt-path <path>] [--auth-token <token>]
+volt gateway install [--home <path>] [--bind <ip>] [--port <port>] [--account <id>] [--dispatch <command>] [--zolt] [--zolt-path <path>] [--zolt-output <text|json|logs|json-stream>] [--auth-token <token>]
+volt gateway start|stop|restart|status|uninstall [--home <path>] [--bind <ip>] [--port <port>] [--account <id>] [--dispatch <command>] [--zolt] [--zolt-path <path>] [--zolt-output <text|json|logs|json-stream>] [--auth-token <token>]
 ```
 
 Commands:
