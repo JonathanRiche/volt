@@ -117,6 +117,7 @@ const TelegramRunOptions = struct {
     dispatch: ?[]const u8,
     zolt: bool,
     zolt_command: ?[]const u8,
+    zolt_output: ?[]const u8,
     poll_ms: u64,
     account: ?[]const u8,
 };
@@ -129,6 +130,7 @@ const GatewayRunOptions = struct {
     dispatch: ?[]const u8,
     zolt: bool,
     zolt_command: ?[]const u8,
+    zolt_output: ?[]const u8,
     auth_token: ?[]const u8,
 };
 
@@ -255,6 +257,9 @@ const GatewaySystemdUnit = "volt-gateway.service";
 const GatewayLaunchdLabel = "com.volt.gateway";
 const DefaultAccountId = "default";
 const DefaultCommandCheckArgv = [_][]const u8{ "--help", "-h" };
+const DefaultZoltOutputMode = "json";
+const SupportedZoltOutputModes = [_][]const u8{ "text", "json", "logs", "json-stream" };
+const VoltZoltOutputError = error{InvalidZoltOutputMode};
 const DefaultVoltDebugOutputChars = 2048;
 const VoltDebugEnvVar = "VOLT_DEBUG";
 
@@ -264,6 +269,24 @@ fn isHelp(arg: []const u8) bool {
     return std.mem.eql(u8, arg, "--help") or
         std.mem.eql(u8, arg, "-h") or
         std.mem.eql(u8, arg, "help");
+}
+
+fn isZoltTextOutputMode(mode: []const u8) bool {
+    return std.mem.eql(u8, mode, "text");
+}
+
+fn resolveZoltOutputMode(raw: ?[]const u8) VoltZoltOutputError![]const u8 {
+    const candidate = std.mem.trim(u8, raw orelse DefaultZoltOutputMode, " \t\r\n");
+    const lowered = candidate;
+    for (SupportedZoltOutputModes) |mode| {
+        if (std.ascii.eqlIgnoreCase(lowered, mode)) {
+            return mode;
+        }
+    }
+    if (candidate.len == 0) {
+        return DefaultZoltOutputMode;
+    }
+    return VoltZoltOutputError.InvalidZoltOutputMode;
 }
 
 fn isVoltDebugEnabled(allocator: Allocator) bool {
@@ -318,15 +341,16 @@ fn printUsage() !void {
         "Usage:\n" ++
         "  volt init [--mirror-volt] [--source <path>] [--home <path>] [--force]\n" ++
         "  volt telegram setup --token <token> [--account <id>] [--allow-from <chat_id>]... [--home <path>] [--force]\n" ++
-        "  volt --telegram [--token <token>] [--account <id>] [--home <path>] [--dispatch <command>] [--zolt] [--zolt-path <path>] [--poll-ms <ms>]\n" ++
-        "  volt gateway [--home <path>] [--bind <ip>] [--port <port>] [--account <id>] [--dispatch <command>] [--zolt] [--zolt-path <path>] [--auth-token <token>]\n" ++
-        "  volt gateway install|start|stop|restart|status|uninstall [--home <path>] [--bind <ip>] [--port <port>] [--account <id>] [--dispatch <command>] [--zolt] [--zolt-path <path>] [--auth-token <token>]\n" ++
+        "  volt --telegram [--token <token>] [--account <id>] [--home <path>] [--dispatch <command>] [--zolt] [--zolt-path <path>] [--zolt-output <text|json|logs|json-stream>] [--poll-ms <ms>]\n" ++
+        "  volt gateway [--home <path>] [--bind <ip>] [--port <port>] [--account <id>] [--dispatch <command>] [--zolt] [--zolt-path <path>] [--zolt-output <text|json|logs|json-stream>] [--auth-token <token>]\n" ++
+        "  volt gateway install|start|stop|restart|status|uninstall [--home <path>] [--bind <ip>] [--port <port>] [--account <id>] [--dispatch <command>] [--zolt] [--zolt-path <path>] [--zolt-output <text|json|logs|json-stream>] [--auth-token <token>]\n" ++
         "\n" ++
         "Dispatch placeholders (for --dispatch args):\n" ++
         "  {message} / {text}, {chat_id}, {account}, {session}\n" ++
         "Allow list behavior:\n" ++
         "  omitting --allow-from allows all chats to use the bot.\n" ++
         "Use --zolt to run messages through: zolt run --session {session} {message}.\n" ++
+        "Default zolt output mode is `json` for Telegram/gateway zolt flows.\n" ++
         "Run `zolt run -h` (or `zolt run --help`) for current supported flags.\n" ++
         "Resolution order for --zolt is: --zolt-path/VOLT_ZOLT_PATH, bundled volt/zolt, then system PATH.\n" ++
         "Set --zolt-path explicitly or the `VOLT_ZOLT_PATH` env var to point at a specific binary.\n" ++
@@ -441,12 +465,20 @@ fn runGateway(allocator: Allocator, opts: GatewayRunOptions) !void {
     const dispatch = if (opts.zolt) dispatch_block: {
         const zolt_cmd = try resolveZoltCommand(allocator, opts.zolt_command);
         defer allocator.free(zolt_cmd);
+        const zolt_output_mode = try resolveZoltOutputMode(opts.zolt_output);
 
-        const zolt_dispatch = try std.fmt.allocPrint(
-            allocator,
-            "{s} run --session {s} {s}",
-            .{ zolt_cmd, "{session}", "{message}" },
-        );
+        const zolt_dispatch = if (isZoltTextOutputMode(zolt_output_mode))
+            try std.fmt.allocPrint(
+                allocator,
+                "{s} run --session {s} {s}",
+                .{ zolt_cmd, "{session}", "{message}" },
+            )
+        else
+            try std.fmt.allocPrint(
+                allocator,
+                "{s} run --output {s} --session {s} {s}",
+                .{ zolt_cmd, zolt_output_mode, "{session}", "{message}" },
+            );
         defer allocator.free(zolt_dispatch);
 
         validateDispatchExecutable(allocator, zolt_cmd) catch |err| {
@@ -976,6 +1008,7 @@ fn runTelegramGateway(allocator: Allocator, opts: TelegramRunOptions) !void {
 
     const dispatch = if (opts.zolt) DispatchPlan{} else try parseDispatchPlan(allocator, opts.dispatch);
     defer deinitDispatchPlan(allocator, dispatch);
+    const zolt_output_mode = if (opts.zolt) try resolveZoltOutputMode(opts.zolt_output) else DefaultZoltOutputMode;
 
     const zolt_cmd = if (opts.zolt) blk: {
         const zolt_cmd = try resolveZoltCommand(allocator, opts.zolt_command);
@@ -1101,6 +1134,7 @@ fn runTelegramGateway(allocator: Allocator, opts: TelegramRunOptions) !void {
                         command,
                         session_key,
                         text,
+                        zolt_output_mode,
                     ) catch |err| {
                         const error_msg = try std.fmt.allocPrint(allocator, "command failed: {s}", .{@errorName(err)});
                         defer allocator.free(error_msg);
@@ -1481,6 +1515,7 @@ fn parseTelegramRunOptions(args: []const []const u8) !TelegramRunOptions {
         .dispatch = null,
         .zolt = false,
         .zolt_command = null,
+        .zolt_output = null,
         .account = null,
         .poll_ms = 2500,
     };
@@ -1528,6 +1563,12 @@ fn parseTelegramRunOptions(args: []const []const u8) !TelegramRunOptions {
             idx += 1;
             continue;
         }
+        if (std.mem.eql(u8, arg, "--zolt-output")) {
+            if (idx + 1 >= args.len) return error.UnexpectedArgument;
+            result.zolt_output = args[idx + 1];
+            idx += 1;
+            continue;
+        }
         if (std.mem.eql(u8, arg, "--poll-ms")) {
             if (idx + 1 >= args.len) return error.UnexpectedArgument;
             result.poll_ms = try std.fmt.parseInt(u64, args[idx + 1], 10);
@@ -1539,6 +1580,12 @@ fn parseTelegramRunOptions(args: []const []const u8) !TelegramRunOptions {
 
     if (result.zolt_command != null and !result.zolt) {
         return error.UnexpectedArgument;
+    }
+    if (result.zolt_output != null and !result.zolt) {
+        return error.UnexpectedArgument;
+    }
+    if (result.zolt_output) |raw| {
+        _ = try resolveZoltOutputMode(raw);
     }
 
     return result;
@@ -1553,6 +1600,7 @@ fn parseGatewayOptions(args: []const []const u8) !GatewayRunOptions {
         .dispatch = null,
         .zolt = false,
         .zolt_command = null,
+        .zolt_output = null,
         .auth_token = null,
     };
 
@@ -1605,6 +1653,12 @@ fn parseGatewayOptions(args: []const []const u8) !GatewayRunOptions {
             idx += 1;
             continue;
         }
+        if (std.mem.eql(u8, arg, "--zolt-output")) {
+            if (idx + 1 >= args.len) return error.UnexpectedArgument;
+            result.zolt_output = args[idx + 1];
+            idx += 1;
+            continue;
+        }
         if (std.mem.eql(u8, arg, "--auth-token")) {
             if (idx + 1 >= args.len) return error.UnexpectedArgument;
             result.auth_token = args[idx + 1];
@@ -1616,6 +1670,12 @@ fn parseGatewayOptions(args: []const []const u8) !GatewayRunOptions {
 
     if (result.zolt_command != null and !result.zolt) {
         return error.UnexpectedArgument;
+    }
+    if (result.zolt_output != null and !result.zolt) {
+        return error.UnexpectedArgument;
+    }
+    if (result.zolt_output) |raw| {
+        _ = try resolveZoltOutputMode(raw);
     }
 
     return result;
@@ -1867,6 +1927,9 @@ fn buildGatewaySystemdUnit(allocator: Allocator, exe_path: []const u8, opts: Gat
         if (opts.zolt_command) |zolt_command| {
             try appendGatewayServiceArg(allocator, &exec_start, "--zolt-path", zolt_command);
         }
+        if (opts.zolt_output) |zolt_output| {
+            try appendGatewayServiceArg(allocator, &exec_start, "--zolt-output", zolt_output);
+        }
     } else if (opts.dispatch) |dispatch| {
         try appendGatewayServiceArg(allocator, &exec_start, "--dispatch", dispatch);
     }
@@ -1924,6 +1987,10 @@ fn buildGatewayLaunchdPlist(allocator: Allocator, exe_path: []const u8, opts: Ga
         if (opts.zolt_command) |zolt_command| {
             try args.append(allocator, try allocator.dupe(u8, "--zolt-path"));
             try args.append(allocator, try allocator.dupe(u8, zolt_command));
+        }
+        if (opts.zolt_output) |zolt_output| {
+            try args.append(allocator, try allocator.dupe(u8, "--zolt-output"));
+            try args.append(allocator, try allocator.dupe(u8, zolt_output));
         }
     } else if (opts.dispatch) |dispatch| {
         try args.append(allocator, try allocator.dupe(u8, "--dispatch"));
@@ -2407,6 +2474,7 @@ fn runTelegramThroughZolt(
     zolt_command: []const u8,
     session_key: []const u8,
     message: []const u8,
+    zolt_output_mode: []const u8,
 ) ![]u8 {
     const existing_session_id = blk: {
         break :blk loadTelegramZoltSessionId(allocator, root, session_key) catch |err| {
@@ -2422,20 +2490,22 @@ fn runTelegramThroughZolt(
             zolt_command,
             mapped_session,
             message,
-            false,
+            zolt_output_mode,
         );
         if (!isZoltSessionNotFound(mapped_output)) {
-            const mapped_parsed = parseZoltRunJson(allocator, mapped_output) catch null;
-            if (mapped_parsed) |parsed| {
-                defer deinitZoltRunOutput(allocator, parsed);
-                if (parsed.response.len > 0) {
-                    allocator.free(mapped_output);
-                    if (parsed.session_id.len > 0 and
-                        !std.mem.eql(u8, parsed.session_id, mapped_session))
-                    {
-                        try persistTelegramZoltSessionId(allocator, root, session_key, parsed.session_id);
+            if (!isZoltTextOutputMode(zolt_output_mode)) {
+                const mapped_parsed = parseZoltRunJson(allocator, mapped_output) catch null;
+                if (mapped_parsed) |parsed| {
+                    defer deinitZoltRunOutput(allocator, parsed);
+                    if (parsed.response.len > 0) {
+                        allocator.free(mapped_output);
+                        if (parsed.session_id.len > 0 and
+                            !std.mem.eql(u8, parsed.session_id, mapped_session))
+                        {
+                            try persistTelegramZoltSessionId(allocator, root, session_key, parsed.session_id);
+                        }
+                        return try allocator.dupe(u8, parsed.response);
                     }
-                    return try allocator.dupe(u8, parsed.response);
                 }
             }
             return mapped_output;
@@ -2444,7 +2514,17 @@ fn runTelegramThroughZolt(
         std.log.warn("volt: zolt session not found, recreating {s}", .{session_key});
     }
 
-    const session_output = try runZoltCommandForMessage(allocator, zolt_command, null, message, true);
+    const bootstrap_output_mode = if (isZoltTextOutputMode(zolt_output_mode))
+        DefaultZoltOutputMode
+    else
+        zolt_output_mode;
+    const session_output = try runZoltCommandForMessage(
+        allocator,
+        zolt_command,
+        null,
+        message,
+        bootstrap_output_mode,
+    );
     defer allocator.free(session_output);
     const parsed = parseZoltRunJson(allocator, session_output) catch |err| {
         std.log.warn("volt: failed to parse zolt json output ({s}): {s}", .{ session_key, @errorName(err) });
@@ -2536,7 +2616,7 @@ fn runZoltCommandForMessage(
     zolt_command: []const u8,
     session_id: ?[]const u8,
     message: []const u8,
-    include_json_output: bool,
+    output_mode: []const u8,
 ) ![]u8 {
     var argv = std.ArrayListUnmanaged([]const u8){};
     defer argv.deinit(allocator);
@@ -2547,9 +2627,9 @@ fn runZoltCommandForMessage(
         try argv.append(allocator, "--session");
         try argv.append(allocator, session);
     }
-    if (include_json_output) {
+    if (!isZoltTextOutputMode(output_mode)) {
         try argv.append(allocator, "--output");
-        try argv.append(allocator, "json");
+        try argv.append(allocator, output_mode);
     }
     try argv.append(allocator, message);
 
@@ -2572,33 +2652,6 @@ fn runZoltCommandForMessage(
             result.stderr.len,
             debugSnippet(allocator, result.stderr),
         });
-    }
-
-    if (include_json_output) {
-        switch (result.term) {
-            .Exited => |code| {
-                if (code != 0 and result.stderr.len > 0) {
-                    return try composeChildOutput(
-                        allocator,
-                        result.stdout,
-                        result.stderr,
-                        result.term,
-                    );
-                }
-            },
-            else => {
-                if (result.stderr.len > 0) {
-                    return try composeChildOutput(
-                        allocator,
-                        result.stdout,
-                        result.stderr,
-                        result.term,
-                    );
-                }
-            },
-        }
-
-        return try allocator.dupe(u8, result.stdout);
     }
 
     switch (result.term) {
@@ -3484,6 +3537,33 @@ test "parseGatewayOptions supports --zolt and enforces exclusivity" {
     );
 }
 
+test "parseGatewayOptions supports --zolt-output" {
+    const opts = try parseGatewayOptions(&.{
+        "--zolt",
+        "--zolt-output",
+        "logs",
+    });
+    try testing.expect(opts.zolt);
+    try testing.expect(opts.zolt_output != null);
+    try testing.expectEqualStrings("logs", opts.zolt_output.?);
+}
+
+test "parseGatewayOptions normalizes output mode casing and rejects invalid values" {
+    try testing.expectEqualStrings(
+        "json-stream",
+        try resolveZoltOutputMode("JSON-STREAM"),
+    );
+
+    try testing.expectError(
+        VoltZoltOutputError.InvalidZoltOutputMode,
+        parseGatewayOptions(&.{
+            "--zolt",
+            "--zolt-output",
+            "wrong-mode",
+        }),
+    );
+}
+
 test "parseGatewayServiceAction maps command strings" {
     try testing.expectEqual(GatewayServiceAction.run, parseGatewayServiceAction("gateway"));
     try testing.expectEqual(GatewayServiceAction.install, parseGatewayServiceAction("install"));
@@ -3505,8 +3585,11 @@ test "buildGatewaySystemdUnit builds launch command and service header" {
         "18889",
         "--account",
         "team",
+        "--zolt",
         "--auth-token",
         "token-123",
+        "--zolt-output",
+        "json",
     });
 
     const unit = try buildGatewaySystemdUnit(allocator, "/usr/local/bin/volt", opts);
@@ -3522,6 +3605,7 @@ test "buildGatewaySystemdUnit builds launch command and service header" {
     try testing.expect(std.mem.indexOf(u8, unit, "'/usr/local/bin/volt' gateway") != null);
     try testing.expect(std.mem.indexOf(u8, unit, "'--bind' '127.0.0.1'") != null);
     try testing.expect(std.mem.indexOf(u8, unit, "'--port' '18889'") != null);
+    try testing.expect(std.mem.indexOf(u8, unit, "'--zolt-output' 'json'") != null);
     try testing.expect(std.mem.indexOf(u8, unit, "WorkingDirectory=") == null);
 }
 
@@ -3535,6 +3619,8 @@ test "buildGatewayLaunchdPlist includes configured arguments" {
         "--port",
         "18889",
         "--zolt",
+        "--zolt-output",
+        "json",
     });
 
     const plist = try buildGatewayLaunchdPlist(allocator, "/usr/local/bin/volt", opts);
@@ -3546,6 +3632,7 @@ test "buildGatewayLaunchdPlist includes configured arguments" {
     try testing.expect(std.mem.indexOf(u8, plist, "<string>gateway</string>") != null);
     try testing.expect(std.mem.indexOf(u8, plist, "<string>--home</string>") != null);
     try testing.expect(std.mem.indexOf(u8, plist, "<string>/tmp/volt</string>") != null);
+    try testing.expect(std.mem.indexOf(u8, plist, "<string>--zolt-output</string>") != null);
     try testing.expect(std.mem.indexOf(u8, plist, "<string>--zolt</string>") != null);
 }
 
@@ -3598,6 +3685,20 @@ test "parseTelegramRunOptions supports --zolt flag" {
     try testing.expect(opts.zolt_command == null);
     try testing.expect(opts.poll_ms == 2500);
     try testing.expect(opts.account == null);
+}
+
+test "parseTelegramRunOptions supports --zolt-output" {
+    const opts = try parseTelegramRunOptions(&.{ "--zolt", "--zolt-output", "json-stream" });
+    try testing.expect(opts.zolt);
+    try testing.expect(opts.zolt_output != null);
+    try testing.expectEqualStrings("json-stream", opts.zolt_output.?);
+}
+
+test "parseTelegramRunOptions rejects invalid output mode" {
+    try testing.expectError(
+        VoltZoltOutputError.InvalidZoltOutputMode,
+        parseTelegramRunOptions(&.{ "--zolt", "--zolt-output", "invalid" }),
+    );
 }
 
 test "parseTelegramRunOptions supports --zolt-path" {
@@ -3968,6 +4069,11 @@ test "runTelegramThroughZolt bootstraps and reuses zolt sessions" {
         \\
         \\message="$1"
         \\
+        \\if [ "$session" = "stale" ]; then
+        \\  echo "session not found: $session" >&2
+        \\  exit 2
+        \\fi
+        \\
         \\if [ "$output_json" -eq 1 ]; then
         \\  if [ -z "$session" ]; then
         \\    session="session_$message"
@@ -3975,18 +4081,13 @@ test "runTelegramThroughZolt bootstraps and reuses zolt sessions" {
         \\  printf '{"session_id":"%s","response":"reply:%s"}' "$session" "$message"
         \\  exit 0
         \\fi
-        \\
-        \\if [ "$session" = "stale" ]; then
-        \\  echo "session not found: $session" >&2
-        \\  exit 2
-        \\fi
         \\printf "ok:$session:$message"
     ;
     try script.writeAll(script_body);
     script.close();
 
     const session_key = "telegram:default:1111";
-    const response_one = try runTelegramThroughZolt(allocator, root, zolt_command, session_key, "hello");
+    const response_one = try runTelegramThroughZolt(allocator, root, zolt_command, session_key, "hello", "json");
     defer allocator.free(response_one);
     try testing.expectEqualStrings("reply:hello", response_one);
 
@@ -3994,12 +4095,12 @@ test "runTelegramThroughZolt bootstraps and reuses zolt sessions" {
     defer if (session_one) |session| allocator.free(session);
     try testing.expectEqualStrings("session_hello", session_one.?);
 
-    const response_two = try runTelegramThroughZolt(allocator, root, zolt_command, session_key, "again");
+    const response_two = try runTelegramThroughZolt(allocator, root, zolt_command, session_key, "again", "json");
     defer allocator.free(response_two);
-    try testing.expectEqualStrings("ok:session_hello:again", response_two);
+    try testing.expectEqualStrings("reply:again", response_two);
 
     try persistTelegramZoltSessionId(allocator, root, session_key, "stale");
-    const response_three = try runTelegramThroughZolt(allocator, root, zolt_command, session_key, "fixed");
+    const response_three = try runTelegramThroughZolt(allocator, root, zolt_command, session_key, "fixed", "json");
     defer allocator.free(response_three);
     try testing.expectEqualStrings("reply:fixed", response_three);
 
