@@ -75,6 +75,11 @@ Telegram chat ids are derived from incoming messages at runtime and mapped to zo
 
 Mapping key is `telegram:<account>:<chat_id>`.
 
+On a first message for a chat, Volt bootstraps a fresh zolt session by prepending a context block that explains:
+- workspace layout and key `.volt` files
+- session/state file locations
+- markdown guidance files in `.volt`.
+
 Slash commands are available in Telegram and are registered as command menu entries:
 
 - `/help` - show quick usage
@@ -191,6 +196,7 @@ curl -H "Authorization: Bearer volt-gateway-token" \
   -H "Content-Type: application/json" \
   -d '{"message":"ping","chat_id":123}' \
   http://127.0.0.1:18789/invoke
+```
 
 ### `volt gateway` service
 
@@ -210,7 +216,6 @@ Notes:
 - Linux uses `systemd --user` units under `$XDG_CONFIG_HOME/systemd/user` (or `~/.config/systemd/user`).
 - macOS uses `~/Library/LaunchAgents/com.volt.gateway.plist`.
 - On macOS, `status` currently reports bootstrap state from `launchctl print`.
-```
 
 ### No args
 

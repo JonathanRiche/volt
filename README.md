@@ -44,7 +44,7 @@ volt init --home ~/.volt
 
 ### Telegram setup (token only)
 
-Use token-only setup like OpenClaw:
+Use token-only setup:
 
 ```bash
 volt telegram setup --home ~/.volt --token "<bot_token>"
@@ -149,7 +149,6 @@ Commands:
 - `uninstall`: stops and removes the service definition.
 
 This currently integrates with `systemd` (Linux) and `launchd` (macOS).
-```
 
 ## Documentation
 
