@@ -362,6 +362,8 @@ const MaxGatewayRequestSize = 64 * 1024;
 const GatewayServiceName = "volt-gateway";
 const GatewaySystemdUnit = "volt-gateway.service";
 const GatewayLaunchdLabel = "com.volt.gateway";
+const TelegramSystemdUnit = "volt-telegram.service";
+const TelegramLaunchdLabel = "com.volt.telegram";
 const DefaultAccountId = "default";
 const DefaultCommandCheckArgv = [_][]const u8{ "--help", "-h" };
 const DefaultZoltOutputMode = "json";
@@ -448,6 +450,7 @@ fn printUsage() !void {
         "Usage:\n" ++
         "  volt init [--mirror-volt] [--source <path>] [--home <path>] [--force]\n" ++
         "  volt telegram setup --token <token> [--account <id>] [--allow-from <chat_id>]... [--home <path>] [--force]\n" ++
+        "  volt telegram install|start|stop|restart|status|uninstall [--token <token>] [--account <id>] [--home <path>] [--dispatch <command>] [--zolt] [--zolt-path <path>] [--zolt-output <text|json|logs|json-stream>] [--poll-ms <ms>]\n" ++
         "  volt --telegram [--token <token>] [--account <id>] [--home <path>] [--dispatch <command>] [--zolt] [--zolt-path <path>] [--zolt-output <text|json|logs|json-stream>] [--poll-ms <ms>]\n" ++
         "  volt gateway [--home <path>] [--bind <ip>] [--port <port>] [--account <id>] [--dispatch <command>] [--zolt] [--zolt-path <path>] [--zolt-output <text|json|logs|json-stream>] [--auth-token <token>]\n" ++
         "  volt gateway install|start|stop|restart|status|uninstall [--home <path>] [--bind <ip>] [--port <port>] [--account <id>] [--dispatch <command>] [--zolt] [--zolt-path <path>] [--zolt-output <text|json|logs|json-stream>] [--auth-token <token>]\n" ++
@@ -495,14 +498,28 @@ pub fn main() !void {
     }
 
     if (std.mem.eql(u8, args[1], "telegram")) {
-        if (args.len < 3 or !std.mem.eql(u8, args[2], "setup")) {
+        if (args.len >= 3 and std.mem.eql(u8, args[2], "setup")) {
+            var opts = try parseTelegramSetupOptions(allocator, args[3..]);
+            defer opts.allow_from.deinit(allocator);
+            try runTelegramSetup(allocator, opts);
+            return;
+        }
+
+        if (args.len >= 3) {
+            const action = parseGatewayServiceAction(args[2]);
+            if (action != .run) {
+                const opts = try parseTelegramRunOptions(args[3..]);
+                try runTelegramServiceAction(allocator, action, opts);
+                return;
+            }
+        }
+
+        if (args.len < 3) {
             try printUsage();
             return;
         }
 
-        var opts = try parseTelegramSetupOptions(allocator, args[3..]);
-        defer opts.allow_from.deinit(allocator);
-        try runTelegramSetup(allocator, opts);
+        try printUsage();
         return;
     }
 
@@ -2304,6 +2321,132 @@ fn parseGatewayServiceAction(arg: []const u8) GatewayServiceAction {
     return .run;
 }
 
+fn runTelegramServiceAction(
+    allocator: Allocator,
+    action: GatewayServiceAction,
+    opts: TelegramRunOptions,
+) !void {
+    switch (builtin.os.tag) {
+        .linux => {
+            try runTelegramServiceLinux(allocator, action, opts);
+        },
+        .macos => {
+            try runTelegramServiceMacos(allocator, action, opts);
+        },
+        else => return GatewayServiceError.GatewayServiceUnsupportedPlatform,
+    }
+}
+
+fn runTelegramServiceLinux(allocator: Allocator, action: GatewayServiceAction, opts: TelegramRunOptions) !void {
+    const exe_path = try std.fs.selfExePathAlloc(allocator);
+    defer allocator.free(exe_path);
+
+    const unit_path = try resolveTelegramSystemdServicePath(allocator);
+    defer allocator.free(unit_path);
+
+    switch (action) {
+        .install => {
+            const unit = try buildTelegramSystemdUnit(allocator, exe_path, opts);
+            defer allocator.free(unit);
+            try writeTextFile(unit_path, unit, true);
+            try runGatewayCommand(allocator, &.{ "systemctl", "--user", "daemon-reload" }, false);
+            try runGatewayCommand(allocator, &.{ "systemctl", "--user", "enable", TelegramSystemdUnit }, false);
+            try runGatewayCommand(allocator, &.{ "systemctl", "--user", "start", TelegramSystemdUnit }, false);
+            try std.fs.File.stderr().deprecatedWriter().print("volt: installed telegram service: {s}\n", .{TelegramSystemdUnit});
+        },
+        .uninstall => {
+            try runGatewayCommandOrWarn(allocator, &.{ "systemctl", "--user", "stop", TelegramSystemdUnit });
+            try runGatewayCommandOrWarn(allocator, &.{ "systemctl", "--user", "disable", TelegramSystemdUnit });
+            if (std.fs.cwd().deleteFile(unit_path)) |_| {} else |err| if (err != error.FileNotFound) return err;
+            try runGatewayCommand(allocator, &.{ "systemctl", "--user", "daemon-reload" }, false);
+            try std.fs.File.stderr().deprecatedWriter().print("volt: uninstalled telegram service: {s}\n", .{TelegramSystemdUnit});
+        },
+        .start => {
+            try runGatewayCommand(allocator, &.{ "systemctl", "--user", "start", TelegramSystemdUnit }, false);
+            try std.fs.File.stderr().deprecatedWriter().print("volt: started telegram service\n", .{});
+        },
+        .stop => {
+            try runGatewayCommand(allocator, &.{ "systemctl", "--user", "stop", TelegramSystemdUnit }, true);
+            try std.fs.File.stderr().deprecatedWriter().print("volt: stopped telegram service\n", .{});
+        },
+        .restart => {
+            try runGatewayCommand(allocator, &.{ "systemctl", "--user", "restart", TelegramSystemdUnit }, true);
+            try std.fs.File.stderr().deprecatedWriter().print("volt: restarted telegram service\n", .{});
+        },
+        .status => {
+            var status = std.ArrayListUnmanaged(u8){};
+            defer status.deinit(allocator);
+            try status.appendSlice(allocator, "unknown");
+
+            try runGatewayCommandWithOutput(
+                allocator,
+                &.{ "systemctl", "--user", "is-active", TelegramSystemdUnit },
+                true,
+                &status,
+                true,
+            );
+
+            std.fs.File.stderr().deprecatedWriter().print("volt: telegram service status: {s}\n", .{status.items}) catch {};
+        },
+        .run => return,
+    }
+}
+
+fn runTelegramServiceMacos(allocator: Allocator, action: GatewayServiceAction, opts: TelegramRunOptions) !void {
+    const exe_path = try std.fs.selfExePathAlloc(allocator);
+    defer allocator.free(exe_path);
+
+    const plist_path = try resolveTelegramLaunchdPlistPath(allocator);
+    defer allocator.free(plist_path);
+
+    const service_label = TelegramLaunchdLabel;
+    const gui_scope = try getLaunchdGuiScope(allocator);
+    defer allocator.free(gui_scope);
+    const launchd_service = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ gui_scope, service_label });
+    defer allocator.free(launchd_service);
+
+    switch (action) {
+        .install => {
+            const plist = try buildTelegramLaunchdPlist(allocator, exe_path, opts);
+            defer allocator.free(plist);
+            try writeTextFile(plist_path, plist, true);
+            try runGatewayCommand(allocator, &.{ "launchctl", "bootstrap", gui_scope, plist_path }, false);
+            try std.fs.File.stderr().deprecatedWriter().print("volt: installed telegram service: {s}\n", .{service_label});
+        },
+        .uninstall => {
+            try runGatewayCommand(allocator, &.{ "launchctl", "bootout", gui_scope, plist_path }, true);
+            if (std.fs.cwd().deleteFile(plist_path)) |_| {} else |err| if (err != error.FileNotFound) return err;
+            try std.fs.File.stderr().deprecatedWriter().print("volt: uninstalled telegram service: {s}\n", .{service_label});
+        },
+        .start => {
+            try runGatewayCommand(allocator, &.{ "launchctl", "bootstrap", gui_scope, plist_path }, false);
+            try std.fs.File.stderr().deprecatedWriter().print("volt: started telegram service\n", .{});
+        },
+        .stop => {
+            try runGatewayCommandOrWarn(allocator, &.{ "launchctl", "bootout", gui_scope, launchd_service });
+            try std.fs.File.stderr().deprecatedWriter().print("volt: stopped telegram service\n", .{});
+        },
+        .restart => {
+            try runGatewayCommandOrWarn(allocator, &.{ "launchctl", "bootout", gui_scope, launchd_service });
+            try runGatewayCommand(allocator, &.{ "launchctl", "bootstrap", gui_scope, plist_path }, false);
+            try std.fs.File.stderr().deprecatedWriter().print("volt: restarted telegram service\n", .{});
+        },
+        .status => {
+            var status = std.ArrayListUnmanaged(u8){};
+            defer status.deinit(allocator);
+            try runGatewayCommandWithOutput(
+                allocator,
+                &.{ "launchctl", "print", launchd_service },
+                false,
+                &status,
+                true,
+            );
+            try std.fs.File.stderr().deprecatedWriter().print("volt: telegram service status:\n{s}\n", .{status.items});
+        },
+        .run => return,
+    }
+}
+
 fn runGatewayServiceAction(
     allocator: Allocator,
     action: GatewayServiceAction,
@@ -2502,6 +2645,16 @@ fn resolveGatewaySystemdServicePath(allocator: Allocator) ![]u8 {
     return try joinPath(allocator, user_path, GatewaySystemdUnit);
 }
 
+fn resolveTelegramSystemdServicePath(allocator: Allocator) ![]u8 {
+    const config_root = resolveGatewayXdgConfigRoot(allocator) catch return error.GatewayServiceUnsupportedPlatform;
+    const systemd_path = try joinPath(allocator, config_root, "systemd");
+    defer allocator.free(systemd_path);
+    const user_path = try joinPath(allocator, systemd_path, "user");
+    defer allocator.free(user_path);
+    try ensureDirIfMissing(user_path);
+    return try joinPath(allocator, user_path, TelegramSystemdUnit);
+}
+
 fn resolveGatewayXdgConfigRoot(allocator: Allocator) ![]u8 {
     const xdg = std.process.getEnvVarOwned(allocator, "XDG_CONFIG_HOME") catch |err| {
         if (err != error.EnvironmentVariableNotFound) return err;
@@ -2519,6 +2672,127 @@ fn resolveGatewayLaunchdPlistPath(allocator: Allocator) ![]u8 {
     defer allocator.free(support);
     try ensureDirIfMissing(support);
     return try std.fmt.allocPrint(allocator, "{s}/{s}.plist", .{ support, GatewayLaunchdLabel });
+}
+
+fn resolveTelegramLaunchdPlistPath(allocator: Allocator) ![]u8 {
+    const home = try resolveVoltHome(allocator);
+    defer allocator.free(home);
+    const support = try joinPath(allocator, home, "Library/LaunchAgents");
+    defer allocator.free(support);
+    try ensureDirIfMissing(support);
+    return try std.fmt.allocPrint(allocator, "{s}/{s}.plist", .{ support, TelegramLaunchdLabel });
+}
+
+fn buildTelegramSystemdUnit(allocator: Allocator, exe_path: []const u8, opts: TelegramRunOptions) ![]u8 {
+    var exec_start = std.ArrayListUnmanaged(u8){};
+    defer exec_start.deinit(allocator);
+
+    const escaped_exe = try systemdShellQuote(allocator, exe_path);
+    defer allocator.free(escaped_exe);
+    try exec_start.appendSlice(allocator, escaped_exe);
+    try exec_start.appendSlice(allocator, " --telegram");
+    try appendTelegramServiceArg(allocator, &exec_start, "--home", opts.home_path);
+    try appendTelegramServiceArg(allocator, &exec_start, "--token", opts.token);
+    try appendTelegramServiceArg(allocator, &exec_start, "--account", opts.account);
+    if (opts.zolt) {
+        try exec_start.appendSlice(allocator, " --zolt");
+        if (opts.zolt_command) |zolt_command| {
+            try appendTelegramServiceArg(allocator, &exec_start, "--zolt-path", zolt_command);
+        }
+        if (opts.zolt_output) |zolt_output| {
+            try appendTelegramServiceArg(allocator, &exec_start, "--zolt-output", zolt_output);
+        }
+    } else if (opts.dispatch) |dispatch| {
+        try appendTelegramServiceArg(allocator, &exec_start, "--dispatch", dispatch);
+    }
+    const poll_ms = try std.fmt.allocPrint(allocator, "{d}", .{opts.poll_ms});
+    defer allocator.free(poll_ms);
+    try appendTelegramServiceArg(allocator, &exec_start, "--poll-ms", poll_ms);
+
+    return std.fmt.allocPrint(
+        allocator,
+        "[Unit]\n" ++
+            "Description=volt telegram service\n" ++
+            "After=network.target\n" ++
+            "\n" ++
+            "[Service]\n" ++
+            "Type=simple\n" ++
+            "ExecStart={s}\n" ++
+            "Restart=always\n" ++
+            "RestartSec=2\n" ++
+            "\n" ++
+            "[Install]\n" ++
+            "WantedBy=default.target\n",
+        .{exec_start.items},
+    );
+}
+
+fn buildTelegramLaunchdPlist(allocator: Allocator, exe_path: []const u8, opts: TelegramRunOptions) ![]u8 {
+    var args = std.ArrayListUnmanaged([]const u8){};
+    defer {
+        for (args.items) |entry| allocator.free(entry);
+        args.deinit(allocator);
+    }
+
+    try args.append(allocator, try allocator.dupe(u8, exe_path));
+    try args.append(allocator, try allocator.dupe(u8, "--telegram"));
+    if (opts.home_path) |home_path| {
+        try args.append(allocator, try allocator.dupe(u8, "--home"));
+        try args.append(allocator, try allocator.dupe(u8, home_path));
+    }
+    if (opts.token) |token| {
+        try args.append(allocator, try allocator.dupe(u8, "--token"));
+        try args.append(allocator, try allocator.dupe(u8, token));
+    }
+    if (opts.account) |account| {
+        try args.append(allocator, try allocator.dupe(u8, "--account"));
+        try args.append(allocator, try allocator.dupe(u8, account));
+    }
+    if (opts.zolt) {
+        try args.append(allocator, try allocator.dupe(u8, "--zolt"));
+        if (opts.zolt_command) |zolt_command| {
+            try args.append(allocator, try allocator.dupe(u8, "--zolt-path"));
+            try args.append(allocator, try allocator.dupe(u8, zolt_command));
+        }
+        if (opts.zolt_output) |zolt_output| {
+            try args.append(allocator, try allocator.dupe(u8, "--zolt-output"));
+            try args.append(allocator, try allocator.dupe(u8, zolt_output));
+        }
+    } else if (opts.dispatch) |dispatch| {
+        try args.append(allocator, try allocator.dupe(u8, "--dispatch"));
+        try args.append(allocator, try allocator.dupe(u8, dispatch));
+    }
+    const poll_ms = try std.fmt.allocPrint(allocator, "{d}", .{opts.poll_ms});
+    defer allocator.free(poll_ms);
+    try args.append(allocator, try allocator.dupe(u8, "--poll-ms"));
+    try args.append(allocator, try allocator.dupe(u8, poll_ms));
+
+    var xml = std.ArrayListUnmanaged(u8){};
+    defer xml.deinit(allocator);
+    try xml.appendSlice(allocator, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+    try xml.appendSlice(allocator, "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n");
+    try xml.appendSlice(allocator, "<plist version=\"1.0\">\n");
+    try xml.appendSlice(allocator, "  <dict>\n");
+    try xml.appendSlice(allocator, "    <key>Label</key>\n");
+    try xml.appendSlice(allocator, "    <string>");
+    try xml.appendSlice(allocator, TelegramLaunchdLabel);
+    try xml.appendSlice(allocator, "</string>\n");
+    try xml.appendSlice(allocator, "    <key>RunAtLoad</key>\n");
+    try xml.appendSlice(allocator, "    <true/>\n");
+    try xml.appendSlice(allocator, "    <key>ProgramArguments</key>\n");
+    try xml.appendSlice(allocator, "    <array>\n");
+    for (args.items) |arg| {
+        try xml.appendSlice(allocator, "      <string>");
+        const escaped = try escapeXmlString(allocator, arg);
+        defer allocator.free(escaped);
+        try xml.appendSlice(allocator, escaped);
+        try xml.appendSlice(allocator, "</string>\n");
+    }
+    try xml.appendSlice(allocator, "    </array>\n");
+    try xml.appendSlice(allocator, "  </dict>\n");
+    try xml.appendSlice(allocator, "</plist>\n");
+
+    return xml.toOwnedSlice(allocator);
 }
 
 fn buildGatewaySystemdUnit(allocator: Allocator, exe_path: []const u8, opts: GatewayRunOptions) ![]u8 {
@@ -2643,6 +2917,25 @@ fn buildGatewayLaunchdPlist(allocator: Allocator, exe_path: []const u8, opts: Ga
 }
 
 fn appendGatewayServiceArg(
+    allocator: Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    name: []const u8,
+    value: ?[]const u8,
+) !void {
+    if (value) |raw| {
+        if (raw.len == 0) return;
+        try out.appendSlice(allocator, " ");
+        const escaped_name = try systemdShellQuote(allocator, name);
+        defer allocator.free(escaped_name);
+        try out.appendSlice(allocator, escaped_name);
+        const escaped_value = try systemdShellQuote(allocator, raw);
+        defer allocator.free(escaped_value);
+        try out.appendSlice(allocator, " ");
+        try out.appendSlice(allocator, escaped_value);
+    }
+}
+
+fn appendTelegramServiceArg(
     allocator: Allocator,
     out: *std.ArrayListUnmanaged(u8),
     name: []const u8,
@@ -3185,8 +3478,11 @@ fn deinitZoltRunOutput(allocator: Allocator, output: ZoltRunOutput) void {
 }
 
 fn hydrateZoltDisplayText(allocator: Allocator, output: ZoltRunOutput) ![]u8 {
+    const response_is_tool_payload = isToolPayloadResponse(allocator, output.response);
+    const final_is_tool_payload = isToolPayloadResponse(allocator, output.final_response);
+
     if (isZoltProviderPingFailureResponse(output.response)) {
-        if (output.final_response.len > 0) {
+        if (output.final_response.len > 0 and !final_is_tool_payload) {
             return try allocator.dupe(u8, output.final_response);
         }
         return try allocator.dupe(
@@ -3194,18 +3490,35 @@ fn hydrateZoltDisplayText(allocator: Allocator, output: ZoltRunOutput) ![]u8 {
             "Temporary provider stream error (`event: ping`). Please retry, or switch model/provider.",
         );
     }
-    if (isToolPayloadResponse(allocator, output.response) and output.final_response.len > 0) {
+    if (response_is_tool_payload and output.final_response.len > 0 and !final_is_tool_payload) {
         return try allocator.dupe(u8, output.final_response);
     }
-    if (isToolPayloadResponse(allocator, output.response)) {
-        return try allocator.dupe(u8, "I am unable to return a user-facing response for this tool call yet.");
+    if (response_is_tool_payload) {
+        return try allocator.dupe(
+            u8,
+            "I completed tool actions but did not receive a user-facing reply. Please ask me to try again.",
+        );
     }
-    return try allocator.dupe(u8, output.response);
+    if (output.response.len > 0) {
+        return try allocator.dupe(u8, output.response);
+    }
+    if (output.final_response.len > 0 and !final_is_tool_payload) {
+        return try allocator.dupe(u8, output.final_response);
+    }
+    return try allocator.dupe(u8, "I did not receive a usable response from the model. Please retry.");
 }
 
 fn isToolPayloadResponse(allocator: Allocator, response: []const u8) bool {
     const trimmed = std.mem.trim(u8, response, " \t\r\n");
-    if (trimmed.len == 0 or !std.mem.startsWith(u8, trimmed, "{")) {
+    if (trimmed.len == 0) {
+        return false;
+    }
+
+    if (looksLikeToolControlMarker(trimmed)) {
+        return true;
+    }
+
+    if (!std.mem.startsWith(u8, trimmed, "{")) {
         return false;
     }
 
@@ -3221,6 +3534,17 @@ fn isToolPayloadResponse(allocator: Allocator, response: []const u8) bool {
     if (resolveJsonValue(root, &.{"cmd"}) != null) return true;
     if (resolveJsonValue(root, &.{"command"}) != null) return true;
     if (resolveJsonValue(root, &.{"yield_ms"}) != null) return true;
+    return false;
+}
+
+fn looksLikeToolControlMarker(trimmed: []const u8) bool {
+    if (std.mem.startsWith(u8, trimmed, "[tool]")) return true;
+    if (std.mem.startsWith(u8, trimmed, "<EXEC_COMMAND>")) return true;
+    if (std.mem.startsWith(u8, trimmed, "<READ>")) return true;
+    if (std.mem.startsWith(u8, trimmed, "<READ_FILE>")) return true;
+    if (std.mem.startsWith(u8, trimmed, "<APPLY_PATCH>")) return true;
+    if (std.mem.startsWith(u8, trimmed, "<VIEW_IMAGE>")) return true;
+    if (std.mem.startsWith(u8, trimmed, "<WRITE_FILE>")) return true;
     return false;
 }
 
@@ -4892,6 +5216,37 @@ test "buildGatewaySystemdUnit builds launch command and service header" {
     try testing.expect(std.mem.indexOf(u8, unit, "WorkingDirectory=") == null);
 }
 
+test "buildTelegramSystemdUnit builds launch command and service header" {
+    const allocator = testing.allocator;
+    const opts = try parseTelegramRunOptions(&.{
+        "--home",
+        "/tmp/volt",
+        "--account",
+        "team",
+        "--zolt",
+        "--zolt-output",
+        "json",
+        "--poll-ms",
+        "3200",
+    });
+
+    const unit = try buildTelegramSystemdUnit(allocator, "/usr/local/bin/volt", opts);
+    defer allocator.free(unit);
+
+    try testing.expect(std.mem.indexOf(u8, unit, "[Unit]") != null);
+    try testing.expect(std.mem.indexOf(u8, unit, "[Service]") != null);
+    try testing.expect(std.mem.indexOf(u8, unit, "Type=simple") != null);
+    try testing.expect(std.mem.indexOf(u8, unit, "Restart=always") != null);
+    try testing.expect(std.mem.indexOf(u8, unit, "WantedBy=default.target") != null);
+    try testing.expect(std.mem.indexOf(u8, unit, "Description=volt telegram service") != null);
+    try testing.expect(std.mem.indexOf(u8, unit, "'/usr/local/bin/volt' --telegram") != null);
+    try testing.expect(std.mem.indexOf(u8, unit, "'--home' '/tmp/volt'") != null);
+    try testing.expect(std.mem.indexOf(u8, unit, "'--account' 'team'") != null);
+    try testing.expect(std.mem.indexOf(u8, unit, "'--poll-ms' '3200'") != null);
+    try testing.expect(std.mem.indexOf(u8, unit, "'--zolt-output' 'json'") != null);
+    try testing.expect(std.mem.indexOf(u8, unit, "WorkingDirectory=") == null);
+}
+
 test "buildGatewayLaunchdPlist includes configured arguments" {
     const allocator = testing.allocator;
     const opts = try parseGatewayOptions(&.{
@@ -4917,6 +5272,34 @@ test "buildGatewayLaunchdPlist includes configured arguments" {
     try testing.expect(std.mem.indexOf(u8, plist, "<string>/tmp/volt</string>") != null);
     try testing.expect(std.mem.indexOf(u8, plist, "<string>--zolt-output</string>") != null);
     try testing.expect(std.mem.indexOf(u8, plist, "<string>--zolt</string>") != null);
+}
+
+test "buildTelegramLaunchdPlist includes configured arguments" {
+    const allocator = testing.allocator;
+    const opts = try parseTelegramRunOptions(&.{
+        "--home",
+        "/tmp/volt",
+        "--token",
+        "test-token",
+        "--dispatch",
+        "zolt run {message}",
+        "--poll-ms",
+        "4000",
+    });
+
+    const plist = try buildTelegramLaunchdPlist(allocator, "/usr/local/bin/volt", opts);
+    defer allocator.free(plist);
+
+    try testing.expect(std.mem.indexOf(u8, plist, "<key>Label</key>") != null);
+    try testing.expect(std.mem.indexOf(u8, plist, "<string>com.volt.telegram</string>") != null);
+    try testing.expect(std.mem.indexOf(u8, plist, "<key>ProgramArguments</key>") != null);
+    try testing.expect(std.mem.indexOf(u8, plist, "<string>--telegram</string>") != null);
+    try testing.expect(std.mem.indexOf(u8, plist, "<string>--home</string>") != null);
+    try testing.expect(std.mem.indexOf(u8, plist, "<string>/tmp/volt</string>") != null);
+    try testing.expect(std.mem.indexOf(u8, plist, "<string>--token</string>") != null);
+    try testing.expect(std.mem.indexOf(u8, plist, "<string>test-token</string>") != null);
+    try testing.expect(std.mem.indexOf(u8, plist, "<string>--poll-ms</string>") != null);
+    try testing.expect(std.mem.indexOf(u8, plist, "<string>4000</string>") != null);
 }
 
 test "parseGatewayRoute recognizes supported paths" {
@@ -5509,7 +5892,29 @@ test "hydrateZoltDisplayText hides unsupported tool payload responses" {
     const hydrated = try hydrateZoltDisplayText(allocator, parsed);
     defer allocator.free(hydrated);
 
-    try testing.expect(std.mem.indexOf(u8, hydrated, "unable to") != null);
+    try testing.expect(std.mem.indexOf(u8, hydrated, "did not receive a user-facing reply") != null);
+}
+
+test "hydrateZoltDisplayText hides tool control marker responses" {
+    const allocator = testing.allocator;
+
+    const parsed = ZoltRunOutput{
+        .session_id = try allocator.dupe(u8, "sess_tool"),
+        .response = try allocator.dupe(u8, "[tool] EXEC_COMMAND"),
+        .final_response = try allocator.dupe(u8, "[tool] EXEC_COMMAND"),
+        .provider = try allocator.dupe(u8, "openai"),
+        .model = try allocator.dupe(u8, "gpt-5"),
+        .prompt_tokens = null,
+        .completion_tokens = null,
+        .total_tokens = null,
+    };
+    defer deinitZoltRunOutput(allocator, parsed);
+
+    const hydrated = try hydrateZoltDisplayText(allocator, parsed);
+    defer allocator.free(hydrated);
+
+    try testing.expect(std.mem.indexOf(u8, hydrated, "[tool]") == null);
+    try testing.expect(std.mem.indexOf(u8, hydrated, "did not receive a user-facing reply") != null);
 }
 
 test "parseZoltRunJson ignores stderr noise around json payload" {

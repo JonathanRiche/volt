@@ -153,6 +153,25 @@ or equivalent:
 volt --telegram --zolt
 ```
 
+### `volt telegram` service
+
+Manage Telegram polling as a persistent background process with the platform service manager:
+
+```bash
+volt telegram install [--home <path>] [--token <token>] [--account <id>] [--dispatch <command>] [--zolt] [--zolt-path <path>] [--zolt-output <text|json|logs|json-stream>] [--poll-ms <ms>]
+volt telegram start [--home <path>] [--token <token>] [--account <id>] [--dispatch <command>] [--zolt] [--zolt-path <path>] [--zolt-output <text|json|logs|json-stream>] [--poll-ms <ms>]
+volt telegram stop [--home <path>] [--token <token>] [--account <id>] [--dispatch <command>] [--zolt] [--zolt-path <path>] [--zolt-output <text|json|logs|json-stream>] [--poll-ms <ms>]
+volt telegram restart [--home <path>] [--token <token>] [--account <id>] [--dispatch <command>] [--zolt] [--zolt-path <path>] [--zolt-output <text|json|logs|json-stream>] [--poll-ms <ms>]
+volt telegram status [--home <path>] [--token <token>] [--account <id>] [--dispatch <command>] [--zolt] [--zolt-path <path>] [--zolt-output <text|json|logs|json-stream>] [--poll-ms <ms>]
+volt telegram uninstall [--home <path>] [--token <token>] [--account <id>] [--dispatch <command>] [--zolt] [--zolt-path <path>] [--zolt-output <text|json|logs|json-stream>] [--poll-ms <ms>]
+```
+
+Notes:
+
+- Linux uses `systemd --user` units under `$XDG_CONFIG_HOME/systemd/user` (or `~/.config/systemd/user`).
+- macOS uses `~/Library/LaunchAgents/com.volt.telegram.plist`.
+- On macOS, `status` currently reports bootstrap state from `launchctl print`.
+
 ### `volt gateway`
 
 Start a tiny HTTP gateway for text-message style clients.

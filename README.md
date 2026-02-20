@@ -56,6 +56,38 @@ volt telegram setup --home ~/.volt --token "<bot_token>"
 
 No `--chat-id` is needed for setup; chat ids are discovered from incoming Telegram messages.
 
+### Telegram gateway quick setup
+
+1. Create a Telegram bot with `@BotFather` and copy the bot token.
+2. Initialize Volt workspace:
+
+```bash
+volt init --home ~/.volt
+```
+
+3. Save the token:
+
+```bash
+volt telegram setup --home ~/.volt --token "<bot_token>"
+```
+
+4. Run Telegram polling in foreground:
+
+```bash
+volt --telegram --home ~/.volt --zolt --account default
+```
+
+5. Send a message to your bot in Telegram and run `/status` to confirm the active session/model.
+
+6. Optional daemon mode (keeps Volt running in background):
+
+```bash
+volt telegram install --home ~/.volt --zolt --account default
+volt telegram status --home ~/.volt --account default
+```
+
+Use `volt telegram restart ...`, `volt telegram stop ...`, and `volt telegram uninstall ...` to manage it later.
+
 Volt also registers a Telegram slash-command menu (`/help`, `/commands`, `/sessions`, `/status`, `/reset`, `/models`) when the gateway starts, so you can discover commands in the Telegram UI.
 
 Volt can render Telegram responses with Markdown formatting when the reply contains markdown markers (lists, headings, backticks, links, fences).
@@ -83,6 +115,24 @@ VOLT_DEBUG=1 volt --telegram --home ~/.volt --zolt
 ```
 
 Debug output prints the exact zolt command line and stdout/stderr snippets in stderr.
+
+### Telegram service commands
+
+Volt can run Telegram polling as a background service:
+
+```bash
+volt telegram install [--home <path>] [--token <token>] [--account <id>] [--dispatch <command>] [--zolt] [--zolt-path <path>] [--zolt-output <text|json|logs|json-stream>] [--poll-ms <ms>]
+volt telegram start|stop|restart|status|uninstall [--home <path>] [--token <token>] [--account <id>] [--dispatch <command>] [--zolt] [--zolt-path <path>] [--zolt-output <text|json|logs|json-stream>] [--poll-ms <ms>]
+```
+
+Commands:
+
+- `install`: writes the OS service definition and starts the Telegram worker.
+- `start`: starts an installed service.
+- `stop`: stops a running service.
+- `restart`: restarts a service.
+- `status`: prints current service status using the native OS service manager.
+- `uninstall`: stops and removes the service definition.
 
 Volt can bundle a local `zolt` checkout so `--zolt` can run without a preinstalled system `zolt` binary. When bundling is enabled, Volt prefers:
 
