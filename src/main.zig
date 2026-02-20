@@ -2136,10 +2136,11 @@ fn deinitZoltRunOutput(allocator: Allocator, output: ZoltRunOutput) void {
 }
 
 fn parseZoltRunJson(allocator: Allocator, text: []const u8) !ZoltRunOutput {
+    const json_slice = extractJsonObject(text) orelse return error.InvalidArgument;
     const parsed = try std.json.parseFromSlice(
         std.json.Value,
         allocator,
-        text,
+        json_slice,
         .{ .ignore_unknown_fields = true },
     );
     defer parsed.deinit();
@@ -2157,6 +2158,41 @@ fn parseZoltRunJson(allocator: Allocator, text: []const u8) !ZoltRunOutput {
         .session_id = session_id,
         .response = response,
     };
+}
+
+fn extractJsonObject(text: []const u8) ?[]const u8 {
+    const first = std.mem.indexOfScalar(u8, text, '{') orelse return null;
+    var depth: isize = 0;
+    var in_string = false;
+    var escaped = false;
+
+    for (text[first..], 0..) |byte, i| {
+        if (escaped) {
+            escaped = false;
+            continue;
+        }
+
+        if (byte == '\\' and in_string) {
+            escaped = true;
+            continue;
+        }
+
+        if (byte == '"') {
+            in_string = !in_string;
+        } else if (!in_string) {
+            if (byte == '{') {
+                depth += 1;
+            } else if (byte == '}') {
+                if (depth == 0) return null;
+                depth -= 1;
+                if (depth == 0) {
+                    return text[first .. first + i + 1];
+                }
+            }
+        }
+    }
+
+    return null;
 }
 
 fn isZoltSessionNotFound(output: []const u8) bool {
@@ -2192,6 +2228,33 @@ fn runZoltCommandForMessage(
     defer {
         allocator.free(result.stdout);
         allocator.free(result.stderr);
+    }
+
+    if (include_json_output) {
+        switch (result.term) {
+            .Exited => |code| {
+                if (code != 0 and result.stderr.len > 0) {
+                    return try composeChildOutput(
+                        allocator,
+                        result.stdout,
+                        result.stderr,
+                        result.term,
+                    );
+                }
+            },
+            else => {
+                if (result.stderr.len > 0) {
+                    return try composeChildOutput(
+                        allocator,
+                        result.stdout,
+                        result.stderr,
+                        result.term,
+                    );
+                }
+            },
+        }
+
+        return try allocator.dupe(u8, result.stdout);
     }
 
     return try composeChildOutput(
@@ -3310,6 +3373,21 @@ test "parseZoltRunJson handles missing fields" {
 
     try testing.expectEqualStrings("", parsed.session_id);
     try testing.expectEqualStrings("", parsed.response);
+}
+
+test "parseZoltRunJson ignores stderr noise around json payload" {
+    const allocator = testing.allocator;
+    const payload =
+        "{" ++
+        "\"provider\":\"openai\"," ++
+        "\"session_id\":\"abc\"," ++
+        "\"response\":\"ok\"}" ++
+        "\n[stderr]\ninfo: loaded 91 providers from models cache (cached)";
+    const parsed = try parseZoltRunJson(allocator, payload);
+    defer deinitZoltRunOutput(allocator, parsed);
+
+    try testing.expectEqualStrings("abc", parsed.session_id);
+    try testing.expectEqualStrings("ok", parsed.response);
 }
 
 test "isZoltSessionNotFound detects session error output" {
