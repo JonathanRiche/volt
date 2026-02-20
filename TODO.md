@@ -5,6 +5,8 @@
 - `volt init` command:
   - `--home`, `--source`, `--mirror-volt`, `--force`.
   - Creates a `.volt` workspace and seeds required directories/files.
+  - Seeds default bootstrap markdown guidance files:
+    `AGENTS.md`, `BOOTSTRAP.md`, `SOUL.md`, `TOOLS.md`, `IDENTITY.md`, `USER.md`, `HEARTBEAT.md`.
   - Mirrors selected files from source layout when enabled.
 - `volt telegram setup` command:
   - Sets bot token in `volt.json` for default or normalized account IDs.

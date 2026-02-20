@@ -32,6 +32,9 @@ volt init [--mirror-volt] [--source <path>] [--home <path>] [--force]
 - `--mirror-volt`: copy extra files if present in source.
 - `--force`: overwrite existing files.
 
+`volt init` also seeds workspace guidance markdown templates by default:
+`AGENTS.md`, `BOOTSTRAP.md`, `SOUL.md`, `TOOLS.md`, `IDENTITY.md`, `USER.md`, and `HEARTBEAT.md`.
+
 ### `volt telegram setup`
 
 Set up Telegram config and state for the default or named account.

@@ -251,6 +251,31 @@ const DefaultUpdateCheckJson = "{\"lastCheckedAt\":\"1970-01-01T00:00:00.000Z\"}
 const DefaultTelegramZoltSessionsJson = "{\"version\":1,\"sessions\":[]}";
 const DefaultGatewayToken = "volt-gateway-token";
 const DefaultGatewayBind = "127.0.0.1";
+
+const VoltBootstrapTemplateFile = struct {
+    relative_path: []const u8,
+    body: []const u8,
+};
+
+const VoltBootstrapTemplateFiles = [_]VoltBootstrapTemplateFile{
+    .{ .relative_path = "AGENTS.md", .body = @embedFile("bootstrap_templates/AGENTS.md") },
+    .{ .relative_path = "SOUL.md", .body = @embedFile("bootstrap_templates/SOUL.md") },
+    .{ .relative_path = "TOOLS.md", .body = @embedFile("bootstrap_templates/TOOLS.md") },
+    .{ .relative_path = "IDENTITY.md", .body = @embedFile("bootstrap_templates/IDENTITY.md") },
+    .{ .relative_path = "USER.md", .body = @embedFile("bootstrap_templates/USER.md") },
+    .{ .relative_path = "HEARTBEAT.md", .body = @embedFile("bootstrap_templates/HEARTBEAT.md") },
+    .{ .relative_path = "BOOTSTRAP.md", .body = @embedFile("bootstrap_templates/BOOTSTRAP.md") },
+};
+
+const VoltInitialBootstrapFiles = [_][]const u8{
+    "AGENTS.md",
+    "SOUL.md",
+    "TOOLS.md",
+    "IDENTITY.md",
+    "USER.md",
+    "HEARTBEAT.md",
+};
+
 fn isSessionMetadataPath(candidate: []const u8) bool {
     var it = std.mem.splitScalar(u8, candidate, '/');
     while (it.next()) |segment| {
@@ -368,6 +393,7 @@ fn printUsage() !void {
         "\n" ++
         "Examples:\n" ++
         "  volt init --home ~/.volt\n" ++
+        "  (init seeds: volt.json + bootstrap markdown files AGENTS.md, BOOTSTRAP.md, SOUL.md, TOOLS.md, IDENTITY.md, USER.md, HEARTBEAT.md)\n" ++
         "  volt telegram setup --home ~/.volt --token 123:ABC\n" ++
         "  volt telegram setup --token 123:ABC --account work --allow-from 8257801789\n" ++
         "  volt --telegram --dispatch \"zolt -s {session} {message}\"\n");
@@ -885,6 +911,8 @@ fn runInit(allocator: Allocator, opts: InitOptions) !void {
     defer allocator.free(volt_path);
     try writeTextFile(volt_path, volt, opts.force);
 
+    try seedVoltBootstrapTemplates(allocator, target_root, opts.force);
+
     const allow_list_path = try joinPath(allocator, target_root, "credentials/telegram-allowFrom.json");
     defer allocator.free(allow_list_path);
     try writeTextFile(allow_list_path, DefaultAllowFromJson, opts.force);
@@ -933,6 +961,28 @@ fn runInit(allocator: Allocator, opts: InitOptions) !void {
     }
 
     if (!copied_any) return error.NoTemplateSourceFiles;
+}
+
+fn isFreshVoltBootstrapWorkspace(allocator: Allocator, root: []const u8) !bool {
+    for (VoltInitialBootstrapFiles) |file_name| {
+        const path = try joinPath(allocator, root, file_name);
+        defer allocator.free(path);
+        if (pathExists(path)) return false;
+    }
+    return true;
+}
+
+fn seedVoltBootstrapTemplates(allocator: Allocator, target_root: []const u8, force: bool) !void {
+    const is_new_workspace = try isFreshVoltBootstrapWorkspace(allocator, target_root);
+
+    for (VoltBootstrapTemplateFiles) |entry| {
+        const is_bootstrap = std.mem.eql(u8, entry.relative_path, "BOOTSTRAP.md");
+        if (is_bootstrap and !force and !is_new_workspace) continue;
+
+        const destination = try joinPath(allocator, target_root, entry.relative_path);
+        defer allocator.free(destination);
+        try writeTextFile(destination, entry.body, force);
+    }
 }
 
 fn runTelegramSetup(allocator: Allocator, opts: TelegramSetupOptions) !void {
@@ -3931,6 +3981,58 @@ test "parseInitOptions parses mirror-volt and source/home paths" {
     try testing.expect(opts.force);
     try testing.expectEqualStrings("/tmp/volt-home", opts.home_path.?);
     try testing.expectEqualStrings("/tmp/volt-source", opts.source_path.?);
+}
+
+test "runInit seeds default markdown templates" {
+    const allocator = testing.allocator;
+    const root = try std.fmt.allocPrint(allocator, "/tmp/volt-init-markdown-test-{d}", .{std.time.milliTimestamp()});
+    defer allocator.free(root);
+
+    try std.fs.makeDirAbsolute(root);
+    defer std.fs.deleteTreeAbsolute(root) catch {};
+
+    const opts = InitOptions{
+        .mirror_volt = false,
+        .force = false,
+        .home_path = root,
+        .source_path = null,
+    };
+    try runInit(allocator, opts);
+
+    const agents = try joinPath(allocator, root, "AGENTS.md");
+    defer allocator.free(agents);
+    const bootstrap = try joinPath(allocator, root, "BOOTSTRAP.md");
+    defer allocator.free(bootstrap);
+    const soul = try joinPath(allocator, root, "SOUL.md");
+    defer allocator.free(soul);
+    const tools = try joinPath(allocator, root, "TOOLS.md");
+    defer allocator.free(tools);
+    const identity = try joinPath(allocator, root, "IDENTITY.md");
+    defer allocator.free(identity);
+    const user = try joinPath(allocator, root, "USER.md");
+    defer allocator.free(user);
+    const heartbeat = try joinPath(allocator, root, "HEARTBEAT.md");
+    defer allocator.free(heartbeat);
+
+    try testing.expect(pathExists(agents));
+    try testing.expect(pathExists(bootstrap));
+    try testing.expect(pathExists(soul));
+    try testing.expect(pathExists(tools));
+    try testing.expect(pathExists(identity));
+    try testing.expect(pathExists(user));
+    try testing.expect(pathExists(heartbeat));
+
+    const agents_content = try readFileAlloc(allocator, agents);
+    defer allocator.free(agents_content);
+    try testing.expect(std.mem.indexOf(u8, agents_content, "AGENTS.md - Your Workspace") != null);
+
+    const bootstrap_content = try readFileAlloc(allocator, bootstrap);
+    defer allocator.free(bootstrap_content);
+    try testing.expect(std.mem.indexOf(u8, bootstrap_content, "BOOTSTRAP.md - Hello, World") != null);
+
+    const soul_content = try readFileAlloc(allocator, soul);
+    defer allocator.free(soul_content);
+    try testing.expect(std.mem.indexOf(u8, soul_content, "# SOUL.md - Who You Are") != null);
 }
 
 test "parseInitOptions rejects unknown argument" {

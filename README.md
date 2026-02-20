@@ -41,6 +41,8 @@ Initialize workspace layout with:
 ```bash
 volt init --home ~/.volt
 ```
+This creates `volt.json` and seeds default markdown guidance files for the first-run bootstrap:
+`AGENTS.md`, `BOOTSTRAP.md`, `SOUL.md`, `TOOLS.md`, `IDENTITY.md`, `USER.md`, and `HEARTBEAT.md`.
 
 ### Telegram setup (token only)
 
