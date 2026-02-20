@@ -181,10 +181,44 @@ const TelegramZoltSessionMap = struct {
     sessions: []const TelegramZoltSessionMapEntry = &.{},
 };
 
+const TelegramZoltRunMetadataEntry = struct {
+    key: []const u8,
+    provider: []const u8,
+    model: []const u8,
+    prompt_tokens: ?u64 = null,
+    completion_tokens: ?u64 = null,
+    total_tokens: ?u64 = null,
+    updated_at_ms: i64 = 0,
+};
+
+const TelegramZoltRunMetadataMap = struct {
+    version: u32 = 1,
+    entries: []const TelegramZoltRunMetadataEntry = &.{},
+};
+
+const TelegramZoltRunMetadata = struct {
+    provider: []u8,
+    model: []u8,
+    prompt_tokens: ?u64,
+    completion_tokens: ?u64,
+    total_tokens: ?u64,
+    updated_at_ms: i64,
+
+    fn deinit(self: TelegramZoltRunMetadata, allocator: Allocator) void {
+        allocator.free(self.provider);
+        allocator.free(self.model);
+    }
+};
+
 const ZoltRunOutput = struct {
     session_id: []const u8,
     response: []const u8,
     final_response: []const u8,
+    provider: []const u8,
+    model: []const u8,
+    prompt_tokens: ?u64,
+    completion_tokens: ?u64,
+    total_tokens: ?u64,
 };
 
 const DispatchMode = enum { shell, argv };
@@ -271,6 +305,7 @@ const DefaultOffsetJson = "{\"version\":1,\"lastUpdateId\":0}";
 const DefaultPairingJson = "{\"version\":1,\"requests\":[]}";
 const DefaultUpdateCheckJson = "{\"lastCheckedAt\":\"1970-01-01T00:00:00.000Z\"}";
 const DefaultTelegramZoltSessionsJson = "{\"version\":1,\"sessions\":[]}";
+const DefaultTelegramZoltMetadataJson = "{\"version\":1,\"entries\":[]}";
 const DefaultGatewayToken = "volt-gateway-token";
 const DefaultGatewayBind = "127.0.0.1";
 const TelegramMarkdownParseMode = "Markdown";
@@ -1595,19 +1630,50 @@ fn executeTelegramSlashCommand(
     if (isTelegramSlashCommand(command.command, "status")) {
         const mapped = loadTelegramZoltSessionId(allocator, root, session_key) catch null;
         defer if (mapped) |session| allocator.free(session);
+        const metadata = loadTelegramZoltRunMetadata(allocator, root, session_key) catch null;
+        defer if (metadata) |meta| meta.deinit(allocator);
 
         const mapped_value = if (mapped) |session| session else "none";
         const zolt_label = zolt_cmd orelse "(not configured)";
+        const provider_value = if (metadata) |meta|
+            if (meta.provider.len > 0) meta.provider else "unknown"
+        else
+            "unknown";
+        const model_value = if (metadata) |meta|
+            if (meta.model.len > 0) meta.model else "unknown"
+        else
+            "unknown";
+        const prompt_tokens_value = if (metadata) |meta| meta.prompt_tokens else null;
+        const completion_tokens_value = if (metadata) |meta| meta.completion_tokens else null;
+        const total_tokens_value = if (metadata) |meta| meta.total_tokens else null;
+
+        const usage_summary = try formatTokenUsageSummary(
+            allocator,
+            prompt_tokens_value,
+            completion_tokens_value,
+            total_tokens_value,
+        );
+        defer allocator.free(usage_summary);
 
         return try std.fmt.allocPrint(
             allocator,
-            "Volt status\naccount: {s}\nchat: {d}\nsession-key: {s}\nzolt-session: {s}\nzolt-command: {s}\n",
-            .{ account, chat_id, session_key, mapped_value, zolt_label },
+            "Volt status\naccount: {s}\nchat: {d}\nsession-key: {s}\nzolt-session: {s}\nzolt-command: {s}\nprovider: {s}\nmodel: {s}\nlast-token-usage: {s}\n",
+            .{
+                account,
+                chat_id,
+                session_key,
+                mapped_value,
+                zolt_label,
+                provider_value,
+                model_value,
+                usage_summary,
+            },
         );
     }
 
     if (isTelegramSlashCommand(command.command, "reset") or isTelegramSlashCommand(command.command, "new")) {
         const cleared = try clearTelegramZoltSessionId(allocator, root, session_key);
+        _ = clearTelegramZoltRunMetadata(allocator, root, session_key) catch false;
         if (cleared) {
             return try allocator.dupe(u8, "zolt session reset for this chat");
         }
@@ -1626,6 +1692,37 @@ fn executeTelegramSlashCommand(
 
 fn isTelegramSlashCommand(value: []const u8, expected: []const u8) bool {
     return std.ascii.eqlIgnoreCase(value, expected);
+}
+
+fn formatTokenUsageSummary(
+    allocator: Allocator,
+    prompt_tokens: ?u64,
+    completion_tokens: ?u64,
+    total_tokens: ?u64,
+) ![]u8 {
+    const prompt_text = if (prompt_tokens) |value|
+        try std.fmt.allocPrint(allocator, "{d}", .{value})
+    else
+        try allocator.dupe(u8, "unknown");
+    defer allocator.free(prompt_text);
+
+    const completion_text = if (completion_tokens) |value|
+        try std.fmt.allocPrint(allocator, "{d}", .{value})
+    else
+        try allocator.dupe(u8, "unknown");
+    defer allocator.free(completion_text);
+
+    const total_text = if (total_tokens) |value|
+        try std.fmt.allocPrint(allocator, "{d}", .{value})
+    else
+        try allocator.dupe(u8, "unknown");
+    defer allocator.free(total_text);
+
+    return std.fmt.allocPrint(
+        allocator,
+        "prompt={s} completion={s} total={s}",
+        .{ prompt_text, completion_text, total_text },
+    );
 }
 
 fn renderTelegramSlashCommands(allocator: Allocator) ![]u8 {
@@ -2865,6 +2962,12 @@ fn runTelegramThroughZolt(
                 const mapped_parsed = parseZoltRunJson(allocator, mapped_output) catch null;
                 if (mapped_parsed) |parsed| {
                     defer deinitZoltRunOutput(allocator, parsed);
+                    persistTelegramZoltRunMetadata(allocator, root, session_key, parsed) catch |err| {
+                        std.log.warn(
+                            "volt: failed to persist zolt metadata ({s}): {s}",
+                            .{ session_key, @errorName(err) },
+                        );
+                    };
                     if (parsed.response.len > 0 or parsed.final_response.len > 0) {
                         const reply = try hydrateZoltDisplayText(allocator, parsed);
                         allocator.free(mapped_output);
@@ -2915,6 +3018,12 @@ fn runTelegramThroughZolt(
         return error.ZoltSessionIdMissing;
     }
 
+    persistTelegramZoltRunMetadata(allocator, root, session_key, parsed) catch |err| {
+        std.log.warn(
+            "volt: failed to persist zolt metadata ({s}): {s}",
+            .{ session_key, @errorName(err) },
+        );
+    };
     try persistTelegramZoltSessionId(allocator, root, session_key, parsed.session_id);
     return try hydrateZoltDisplayText(allocator, parsed);
 }
@@ -2923,6 +3032,8 @@ fn deinitZoltRunOutput(allocator: Allocator, output: ZoltRunOutput) void {
     allocator.free(output.session_id);
     allocator.free(output.response);
     allocator.free(output.final_response);
+    allocator.free(output.provider);
+    allocator.free(output.model);
 }
 
 fn hydrateZoltDisplayText(allocator: Allocator, output: ZoltRunOutput) ![]u8 {
@@ -2983,12 +3094,33 @@ fn parseZoltRunJson(allocator: Allocator, text: []const u8) !ZoltRunOutput {
     const response = if (resolveJsonStringField(root, &.{"response"})) |raw| blk: {
         break :blk try allocator.dupe(u8, raw);
     } else try allocator.dupe(u8, "");
+    const provider = if (resolveJsonStringField(root, &.{"provider"})) |raw| blk: {
+        break :blk try allocator.dupe(u8, raw);
+    } else try allocator.dupe(u8, "");
+    const model = if (resolveJsonStringField(root, &.{"model"})) |raw| blk: {
+        break :blk try allocator.dupe(u8, raw);
+    } else try allocator.dupe(u8, "");
+    const prompt_tokens = resolveJsonUnsignedField(root, &.{ "usage", "prompt_tokens" }) orelse
+        resolveJsonUnsignedField(root, &.{ "usage", "input_tokens" }) orelse
+        resolveJsonUnsignedField(root, &.{"prompt_tokens"}) orelse
+        resolveJsonUnsignedField(root, &.{"input_tokens"});
+    const completion_tokens = resolveJsonUnsignedField(root, &.{ "usage", "completion_tokens" }) orelse
+        resolveJsonUnsignedField(root, &.{ "usage", "output_tokens" }) orelse
+        resolveJsonUnsignedField(root, &.{"completion_tokens"}) orelse
+        resolveJsonUnsignedField(root, &.{"output_tokens"});
+    const total_tokens = resolveJsonUnsignedField(root, &.{ "usage", "total_tokens" }) orelse
+        resolveJsonUnsignedField(root, &.{"total_tokens"});
     const final_response = try extractZoltRunFinalResponse(allocator, root);
 
     return ZoltRunOutput{
         .session_id = session_id,
         .response = response,
         .final_response = final_response,
+        .provider = provider,
+        .model = model,
+        .prompt_tokens = prompt_tokens,
+        .completion_tokens = completion_tokens,
+        .total_tokens = total_tokens,
     };
 }
 
@@ -3814,6 +3946,19 @@ fn resolveJsonStringField(
     return value.string;
 }
 
+fn resolveJsonUnsignedField(
+    root: *const std.json.Value,
+    path: []const []const u8,
+) ?u64 {
+    const value = resolveJsonValue(root, path) orelse return null;
+    return switch (value.*) {
+        .integer => |raw| if (raw < 0) null else @as(u64, @intCast(raw)),
+        .float => |raw| if (raw < 0) null else @as(u64, @intFromFloat(raw)),
+        .string => |raw| std.fmt.parseInt(u64, std.mem.trim(u8, raw, " \t\r\n"), 10) catch null,
+        else => null,
+    };
+}
+
 fn readTokenFromPath(allocator: Allocator, raw_path: []const u8) !?[]u8 {
     const token_path = std.mem.trim(u8, raw_path, " \t\r\n");
     if (token_path.len == 0) {
@@ -4015,6 +4160,10 @@ fn resolveTelegramZoltSessionPath(allocator: Allocator, root: []const u8) ![]u8 
     return joinPath(allocator, root, "credentials/telegram-zolt-sessions.json");
 }
 
+fn resolveTelegramZoltMetadataPath(allocator: Allocator, root: []const u8) ![]u8 {
+    return joinPath(allocator, root, "credentials/telegram-zolt-metadata.json");
+}
+
 fn loadTelegramZoltSessionId(
     allocator: Allocator,
     root: []const u8,
@@ -4040,6 +4189,43 @@ fn loadTelegramZoltSessionId(
     for (parsed.value.sessions) |entry| {
         if (std.mem.eql(u8, entry.key, key)) {
             return try allocator.dupe(u8, entry.session);
+        }
+    }
+    return null;
+}
+
+fn loadTelegramZoltRunMetadata(
+    allocator: Allocator,
+    root: []const u8,
+    key: []const u8,
+) !?TelegramZoltRunMetadata {
+    const path = try resolveTelegramZoltMetadataPath(allocator, root);
+    defer allocator.free(path);
+
+    const data = readFileAlloc(allocator, path) catch |err| {
+        if (err == error.FileNotFound) return null;
+        return err;
+    };
+    defer allocator.free(data);
+
+    const parsed = try std.json.parseFromSlice(
+        TelegramZoltRunMetadataMap,
+        allocator,
+        data,
+        .{ .ignore_unknown_fields = true },
+    );
+    defer parsed.deinit();
+
+    for (parsed.value.entries) |entry| {
+        if (std.mem.eql(u8, entry.key, key)) {
+            return TelegramZoltRunMetadata{
+                .provider = try allocator.dupe(u8, entry.provider),
+                .model = try allocator.dupe(u8, entry.model),
+                .prompt_tokens = entry.prompt_tokens,
+                .completion_tokens = entry.completion_tokens,
+                .total_tokens = entry.total_tokens,
+                .updated_at_ms = entry.updated_at_ms,
+            };
         }
     }
     return null;
@@ -4084,6 +4270,62 @@ fn clearTelegramZoltSessionId(
     const merged = TelegramZoltSessionMap{
         .version = 1,
         .sessions = sessions.items,
+    };
+
+    var out = std.Io.Writer.Allocating.init(allocator);
+    defer out.deinit();
+
+    var writer = std.json.Stringify{
+        .writer = &out.writer,
+        .options = .{},
+    };
+    try writer.write(merged);
+
+    const payload = try out.toOwnedSlice();
+    defer allocator.free(payload);
+    try writeTextFile(path, payload, true);
+    return true;
+}
+
+fn clearTelegramZoltRunMetadata(
+    allocator: Allocator,
+    root: []const u8,
+    key: []const u8,
+) !bool {
+    const path = try resolveTelegramZoltMetadataPath(allocator, root);
+    defer allocator.free(path);
+
+    const data = readFileAlloc(allocator, path) catch |err| {
+        if (err == error.FileNotFound) return false;
+        return err;
+    };
+    defer allocator.free(data);
+
+    const parsed = try std.json.parseFromSlice(
+        TelegramZoltRunMetadataMap,
+        allocator,
+        data,
+        .{ .ignore_unknown_fields = true },
+    );
+    defer parsed.deinit();
+
+    var entries = std.ArrayListUnmanaged(TelegramZoltRunMetadataEntry){};
+    defer entries.deinit(allocator);
+
+    var removed = false;
+    for (parsed.value.entries) |entry| {
+        if (std.mem.eql(u8, entry.key, key)) {
+            removed = true;
+            continue;
+        }
+        try entries.append(allocator, entry);
+    }
+
+    if (!removed) return false;
+
+    const merged = TelegramZoltRunMetadataMap{
+        .version = 1,
+        .entries = entries.items,
     };
 
     var out = std.Io.Writer.Allocating.init(allocator);
@@ -4155,6 +4397,89 @@ fn persistTelegramZoltSessionId(
     const merged = TelegramZoltSessionMap{
         .version = 1,
         .sessions = sessions.items,
+    };
+
+    var out = std.Io.Writer.Allocating.init(allocator);
+    defer out.deinit();
+
+    var writer = std.json.Stringify{
+        .writer = &out.writer,
+        .options = .{},
+    };
+    try writer.write(merged);
+
+    const payload = try out.toOwnedSlice();
+    defer allocator.free(payload);
+    try writeTextFile(path, payload, true);
+}
+
+fn persistTelegramZoltRunMetadata(
+    allocator: Allocator,
+    root: []const u8,
+    key: []const u8,
+    output: ZoltRunOutput,
+) !void {
+    const path = try resolveTelegramZoltMetadataPath(allocator, root);
+    defer allocator.free(path);
+
+    const path_exists = pathExists(path);
+    const data = blk: {
+        if (!path_exists) break :blk DefaultTelegramZoltMetadataJson;
+        break :blk readFileAlloc(allocator, path) catch |err| switch (err) {
+            error.FileNotFound => DefaultTelegramZoltMetadataJson,
+            else => return err,
+        };
+    };
+    defer if (path_exists) allocator.free(data);
+
+    const parsed = try std.json.parseFromSlice(
+        TelegramZoltRunMetadataMap,
+        allocator,
+        data,
+        .{ .ignore_unknown_fields = true },
+    );
+    defer parsed.deinit();
+
+    var entries = std.ArrayListUnmanaged(TelegramZoltRunMetadataEntry){};
+    defer entries.deinit(allocator);
+
+    const normalized_provider = if (output.provider.len > 0) output.provider else "";
+    const normalized_model = if (output.model.len > 0) output.model else "";
+    const updated_at_ms = std.time.milliTimestamp();
+
+    var found = false;
+    for (parsed.value.entries) |entry| {
+        if (std.mem.eql(u8, entry.key, key)) {
+            try entries.append(allocator, .{
+                .key = key,
+                .provider = normalized_provider,
+                .model = normalized_model,
+                .prompt_tokens = output.prompt_tokens,
+                .completion_tokens = output.completion_tokens,
+                .total_tokens = output.total_tokens,
+                .updated_at_ms = updated_at_ms,
+            });
+            found = true;
+            continue;
+        }
+        try entries.append(allocator, entry);
+    }
+
+    if (!found) {
+        try entries.append(allocator, .{
+            .key = key,
+            .provider = normalized_provider,
+            .model = normalized_model,
+            .prompt_tokens = output.prompt_tokens,
+            .completion_tokens = output.completion_tokens,
+            .total_tokens = output.total_tokens,
+            .updated_at_ms = updated_at_ms,
+        });
+    }
+
+    const merged = TelegramZoltRunMetadataMap{
+        .version = 1,
+        .entries = entries.items,
     };
 
     var out = std.Io.Writer.Allocating.init(allocator);
@@ -4787,6 +5112,46 @@ test "executeTelegramSlashCommand can render status and clear sessions" {
     try testing.expect(std.mem.eql(u8, response_sessions_after_reset, "chat 111 has no active zolt session"));
 }
 
+test "executeTelegramSlashCommand status includes provider model and token usage" {
+    const allocator = testing.allocator;
+    const root = try std.fmt.allocPrint(allocator, "/tmp/volt-slash-status-test-{d}", .{std.time.milliTimestamp()});
+    defer allocator.free(root);
+
+    try std.fs.makeDirAbsolute(root);
+    defer std.fs.deleteTreeAbsolute(root) catch {};
+
+    const session_key = "telegram:default:222";
+    try persistTelegramZoltSessionId(allocator, root, session_key, "z222");
+
+    const output = ZoltRunOutput{
+        .session_id = try allocator.dupe(u8, "z222"),
+        .response = try allocator.dupe(u8, "ok"),
+        .final_response = try allocator.dupe(u8, "ok"),
+        .provider = try allocator.dupe(u8, "openai"),
+        .model = try allocator.dupe(u8, "gpt-5.2-codex"),
+        .prompt_tokens = 123,
+        .completion_tokens = 456,
+        .total_tokens = 579,
+    };
+    defer deinitZoltRunOutput(allocator, output);
+    try persistTelegramZoltRunMetadata(allocator, root, session_key, output);
+
+    const status = try executeTelegramSlashCommand(
+        allocator,
+        .{ .command = "status", .args = "" },
+        root,
+        session_key,
+        "default",
+        222,
+        "zolt",
+    );
+    defer allocator.free(status);
+
+    try testing.expect(std.mem.indexOf(u8, status, "provider: openai") != null);
+    try testing.expect(std.mem.indexOf(u8, status, "model: gpt-5.2-codex") != null);
+    try testing.expect(std.mem.indexOf(u8, status, "last-token-usage: prompt=123 completion=456 total=579") != null);
+}
+
 test "clearTelegramZoltSessionId updates persisted sessions" {
     const allocator = testing.allocator;
     const root = try std.fmt.allocPrint(allocator, "/tmp/volt-clear-session-test-{d}", .{std.time.milliTimestamp()});
@@ -4838,13 +5203,15 @@ test "resolveTelegramOffsetPath uses account-specific naming" {
 
 test "parseZoltRunJson reads session_id and response" {
     const allocator = testing.allocator;
-    const payload = "{\"session_id\":\"sess_123\",\"response\":\"hello\"}";
+    const payload = "{\"session_id\":\"sess_123\",\"response\":\"hello\",\"provider\":\"openai\",\"model\":\"gpt-5\"}";
 
     const parsed = try parseZoltRunJson(allocator, payload);
     defer deinitZoltRunOutput(allocator, parsed);
 
     try testing.expectEqualStrings("sess_123", parsed.session_id);
     try testing.expectEqualStrings("hello", parsed.response);
+    try testing.expectEqualStrings("openai", parsed.provider);
+    try testing.expectEqualStrings("gpt-5", parsed.model);
 }
 
 test "parseZoltRunJson handles missing fields" {
@@ -4855,6 +5222,21 @@ test "parseZoltRunJson handles missing fields" {
 
     try testing.expectEqualStrings("", parsed.session_id);
     try testing.expectEqualStrings("", parsed.response);
+    try testing.expectEqualStrings("", parsed.provider);
+    try testing.expectEqualStrings("", parsed.model);
+}
+
+test "parseZoltRunJson reads usage tokens when present" {
+    const allocator = testing.allocator;
+    const payload =
+        "{\"session_id\":\"abc\",\"response\":\"hello\",\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":22,\"total_tokens\":33}}";
+
+    const parsed = try parseZoltRunJson(allocator, payload);
+    defer deinitZoltRunOutput(allocator, parsed);
+
+    try testing.expectEqual(@as(?u64, 11), parsed.prompt_tokens);
+    try testing.expectEqual(@as(?u64, 22), parsed.completion_tokens);
+    try testing.expectEqual(@as(?u64, 33), parsed.total_tokens);
 }
 
 test "parseZoltRunJson prefers final token event text" {
@@ -4877,6 +5259,11 @@ test "hydrateZoltDisplayText uses final text for tool payload responses" {
         .session_id = try allocator.dupe(u8, "sess_456"),
         .response = try allocator.dupe(u8, "{\"cmd\":\"date +%F\",\"yield_ms\":700}"),
         .final_response = try allocator.dupe(u8, "2026-02-20"),
+        .provider = try allocator.dupe(u8, "openai"),
+        .model = try allocator.dupe(u8, "gpt-5"),
+        .prompt_tokens = null,
+        .completion_tokens = null,
+        .total_tokens = null,
     };
     defer deinitZoltRunOutput(allocator, parsed);
 
@@ -4893,6 +5280,11 @@ test "hydrateZoltDisplayText hides unsupported tool payload responses" {
         .session_id = try allocator.dupe(u8, "sess_789"),
         .response = try allocator.dupe(u8, "{\"cmd\":\"date +%F\",\"yield_ms\":700}"),
         .final_response = try allocator.dupe(u8, ""),
+        .provider = try allocator.dupe(u8, "openai"),
+        .model = try allocator.dupe(u8, "gpt-5"),
+        .prompt_tokens = null,
+        .completion_tokens = null,
+        .total_tokens = null,
     };
     defer deinitZoltRunOutput(allocator, parsed);
 
@@ -4946,6 +5338,11 @@ test "hydrateZoltDisplayText normalizes provider ping failures" {
             "[local] Request failed (status=bad_request body=event: ping data: {\"type\":\"ping\"}).",
         ),
         .final_response = try allocator.dupe(u8, ""),
+        .provider = try allocator.dupe(u8, "opencode"),
+        .model = try allocator.dupe(u8, "claude-sonnet"),
+        .prompt_tokens = null,
+        .completion_tokens = null,
+        .total_tokens = null,
     };
     defer deinitZoltRunOutput(allocator, output);
 

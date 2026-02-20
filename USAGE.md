@@ -91,7 +91,7 @@ Slash commands are available in Telegram and are registered as command menu entr
 - `/help` - show quick usage
 - `/commands` - list available commands
 - `/sessions` - show active zolt session for this chat
-- `/status` - show runtime status
+- `/status` - show runtime status, plus last provider/model and token usage if zolt returns usage in JSON
 - `/reset` - clear this chat's zolt session mapping
 - `/models` - run `zolt models` (requires `--zolt`)
 
