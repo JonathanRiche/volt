@@ -2009,7 +2009,12 @@ fn deinitDispatchPlan(allocator: Allocator, plan: DispatchPlan) void {
 }
 
 fn parseCommandLineTokens(allocator: Allocator, input: []const u8) ![]const []const u8 {
-    var tokens = std.mem.tokenizeAny(u8, input, " \t\r\n");
+    const trimmed = std.mem.trim(u8, input, " \t\r\n");
+    if (trimmed.len == 0) {
+        return try allocator.alloc([]const u8, 0);
+    }
+
+    var tokens = std.mem.tokenizeAny(u8, trimmed, " \t\r\n");
     var out = std.ArrayListUnmanaged([]const u8){};
     defer out.deinit(allocator);
 
@@ -2147,18 +2152,19 @@ fn renderDispatchArg(
         };
         const token = template[start + 1 .. close];
 
-        if (std.mem.eql(u8, token, "message") or std.mem.eql(u8, token, "text"))
-            try appendValue(&out, allocator, ctx.message, message_included, true)
-        else if (std.mem.eql(u8, token, "chat_id")) appendChatId: {
+        if (std.mem.eql(u8, token, "message") or std.mem.eql(u8, token, "text")) {
+            try out.appendSlice(allocator, ctx.message);
+            message_included.* = true;
+        } else if (std.mem.eql(u8, token, "chat_id")) appendChatId: {
             const chat_id_text = try std.fmt.allocPrint(allocator, "{d}", .{ctx.chat_id});
             defer allocator.free(chat_id_text);
-            try appendValue(&out, allocator, chat_id_text, message_included, false);
+            try out.appendSlice(allocator, chat_id_text);
             break :appendChatId;
-        } else if (std.mem.eql(u8, token, "account"))
-            try appendValue(&out, allocator, ctx.account, message_included, false)
-        else if (std.mem.eql(u8, token, "session"))
-            try appendValue(&out, allocator, ctx.session_key, message_included, false)
-        else {
+        } else if (std.mem.eql(u8, token, "account")) {
+            try out.appendSlice(allocator, ctx.account);
+        } else if (std.mem.eql(u8, token, "session")) {
+            try out.appendSlice(allocator, ctx.session_key);
+        } else {
             try out.appendSlice(allocator, template[start .. close + 1]);
         }
 
@@ -2169,17 +2175,6 @@ fn renderDispatchArg(
         return try allocator.dupe(u8, template);
     }
     return out.toOwnedSlice(allocator);
-}
-
-fn appendValue(
-    out: *std.ArrayListUnmanaged(u8),
-    allocator: Allocator,
-    value: []const u8,
-    message_included: *bool,
-    is_message: bool,
-) !void {
-    try out.appendSlice(allocator, value);
-    if (is_message) message_included.* = true;
 }
 
 fn executeShellCommand(allocator: Allocator, command: []const u8) ![]u8 {
