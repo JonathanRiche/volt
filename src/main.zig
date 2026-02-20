@@ -2062,15 +2062,15 @@ fn executeDispatchCommand(allocator: Allocator, argv: []const []const u8, ctx: T
         allocator.free(result.stderr);
     }
 
-    var out = std.ArrayListUnmanaged(u8){};
-    defer out.deinit(allocator);
+    var out = std.Io.Writer.Allocating.init(allocator);
+    defer out.deinit();
 
-    try out.appendSlice(allocator, result.stdout);
+    try out.writer.writeAll(result.stdout);
 
     if (result.stderr.len > 0) {
-        if (out.items.len > 0) try out.appendSlice(allocator, "\n");
-        try out.appendSlice(allocator, "[stderr]\n");
-        try out.appendSlice(allocator, result.stderr);
+        if (result.stdout.len > 0) try out.writer.writeAll("\n");
+        try out.writer.writeAll("[stderr]\n");
+        try out.writer.writeAll(result.stderr);
     }
 
     switch (result.term) {
@@ -2078,25 +2078,25 @@ fn executeDispatchCommand(allocator: Allocator, argv: []const []const u8, ctx: T
             if (code != 0) {
                 const code_text = try std.fmt.allocPrint(allocator, "[exit={d}]", .{code});
                 defer allocator.free(code_text);
-                if (out.items.len > 0) try out.appendSlice(allocator, "\n");
-                try out.appendSlice(allocator, code_text);
+                if (result.stdout.len > 0 or result.stderr.len > 0) try out.writer.writeAll("\n");
+                try out.writer.writeAll(code_text);
             }
         },
         .Signal => {
-            if (out.items.len > 0) try out.appendSlice(allocator, "\n");
-            try out.appendSlice(allocator, "[signal]\n");
+            if (result.stdout.len > 0 or result.stderr.len > 0) try out.writer.writeAll("\n");
+            try out.writer.writeAll("[signal]\n");
         },
         .Stopped => {
-            if (out.items.len > 0) try out.appendSlice(allocator, "\n");
-            try out.appendSlice(allocator, "[stopped]\n");
+            if (result.stdout.len > 0 or result.stderr.len > 0) try out.writer.writeAll("\n");
+            try out.writer.writeAll("[stopped]\n");
         },
         .Unknown => {
-            if (out.items.len > 0) try out.appendSlice(allocator, "\n");
-            try out.appendSlice(allocator, "[unknown]\n");
+            if (result.stdout.len > 0 or result.stderr.len > 0) try out.writer.writeAll("\n");
+            try out.writer.writeAll("[unknown]\n");
         },
     }
 
-    return out.toOwnedSlice(allocator);
+    return out.toOwnedSlice();
 }
 
 const DispatchValidationError = error{
@@ -2222,15 +2222,15 @@ fn executeShellCommand(allocator: Allocator, command: []const u8) ![]u8 {
         allocator.free(result.stderr);
     }
 
-    var out = std.ArrayListUnmanaged(u8){};
-    defer out.deinit(allocator);
+    var out = std.Io.Writer.Allocating.init(allocator);
+    defer out.deinit();
 
-    try out.appendSlice(allocator, result.stdout);
+    try out.writer.writeAll(result.stdout);
 
     if (result.stderr.len > 0) {
-        if (out.items.len > 0) try out.appendSlice(allocator, "\n");
-        try out.appendSlice(allocator, "[stderr]\n");
-        try out.appendSlice(allocator, result.stderr);
+        if (result.stdout.len > 0) try out.writer.writeAll("\n");
+        try out.writer.writeAll("[stderr]\n");
+        try out.writer.writeAll(result.stderr);
     }
 
     switch (result.term) {
@@ -2238,25 +2238,25 @@ fn executeShellCommand(allocator: Allocator, command: []const u8) ![]u8 {
             if (code != 0) {
                 const code_text = try std.fmt.allocPrint(allocator, "[exit={d}]", .{code});
                 defer allocator.free(code_text);
-                if (out.items.len > 0) try out.appendSlice(allocator, "\n");
-                try out.appendSlice(allocator, code_text);
+                if (result.stdout.len > 0 or result.stderr.len > 0) try out.writer.writeAll("\n");
+                try out.writer.writeAll(code_text);
             }
         },
         .Signal => {
-            if (out.items.len > 0) try out.appendSlice(allocator, "\n");
-            try out.appendSlice(allocator, "[signal]\n");
+            if (result.stdout.len > 0 or result.stderr.len > 0) try out.writer.writeAll("\n");
+            try out.writer.writeAll("[signal]\n");
         },
         .Stopped => {
-            if (out.items.len > 0) try out.appendSlice(allocator, "\n");
-            try out.appendSlice(allocator, "[stopped]\n");
+            if (result.stdout.len > 0 or result.stderr.len > 0) try out.writer.writeAll("\n");
+            try out.writer.writeAll("[stopped]\n");
         },
         .Unknown => {
-            if (out.items.len > 0) try out.appendSlice(allocator, "\n");
-            try out.appendSlice(allocator, "[unknown]\n");
+            if (result.stdout.len > 0 or result.stderr.len > 0) try out.writer.writeAll("\n");
+            try out.writer.writeAll("[unknown]\n");
         },
     }
 
-    return out.toOwnedSlice(allocator);
+    return out.toOwnedSlice();
 }
 
 fn fetchUpdates(
