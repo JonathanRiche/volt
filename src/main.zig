@@ -1709,12 +1709,12 @@ fn executeTelegramSlashCommand(
         defer allocator.free(context_left_summary);
         const compact_count_summary = try formatOptionalTokenCount(compact_count_value, allocator);
         defer allocator.free(compact_count_summary);
-        const formatted_chat = try formatSignedI64WithCommas(allocator, chat_id);
+        const formatted_chat = try std.fmt.allocPrint(allocator, "{d}", .{chat_id});
         defer allocator.free(formatted_chat);
 
         return try std.fmt.allocPrint(
             allocator,
-            "Volt status\naccount: {s}\nchat: {s}\nsession-key: {s}\nzolt-session: {s}\nzolt-command: {s}\nprovider: {s}\nmodel: {s}\nlast-token-usage: {s}\ncontext-left: {s}\ncompactions: {s}\n",
+            "Volt status\n👤 account: {s}\n💬 chat: {s}\n🔑 session-key: {s}\n🧵 zolt-session: {s}\n🛠️ zolt-command: {s}\n🌐 provider: {s}\n🧠 model: {s}\n📊 last-token-usage: {s}\n📦 context-left: {s}\n🗜️ compactions: {s}\n",
             .{
                 account,
                 formatted_chat,
@@ -1796,16 +1796,6 @@ fn formatOptionalTokenCount(value: ?u64, allocator: Allocator) ![]u8 {
         return formatUnsignedWithCommas(allocator, raw);
     }
     return allocator.dupe(u8, "unknown");
-}
-
-fn formatSignedI64WithCommas(allocator: Allocator, value: i64) ![]u8 {
-    if (value < 0) {
-        const abs_value: u64 = @intCast(-value);
-        const magnitude = try formatUnsignedWithCommas(allocator, abs_value);
-        defer allocator.free(magnitude);
-        return std.fmt.allocPrint(allocator, "-{s}", .{magnitude});
-    }
-    return formatUnsignedWithCommas(allocator, @intCast(value));
 }
 
 fn formatUnsignedWithCommas(allocator: Allocator, value: u64) ![]u8 {
@@ -5718,11 +5708,13 @@ test "executeTelegramSlashCommand status includes provider model and token usage
         root,
         session_key,
         "default",
-        222,
+        8_257_801_789,
         "zolt",
     );
     defer allocator.free(status);
 
+    try testing.expect(std.mem.indexOf(u8, status, "💬 chat: 8257801789") != null);
+    try testing.expect(std.mem.indexOf(u8, status, "chat: 8,257,801,789") == null);
     try testing.expect(std.mem.indexOf(u8, status, "provider: openai") != null);
     try testing.expect(std.mem.indexOf(u8, status, "model: gpt-5.2-codex") != null);
     try testing.expect(std.mem.indexOf(u8, status, "last-token-usage: prompt=123 completion=456 total=579") != null);
