@@ -2778,15 +2778,8 @@ fn runZoltCommandForMessage(
     }
 
     switch (result.term) {
-        .Exited => |code| {
-            if (code != 0) {
-                return try composeChildOutput(
-                    allocator,
-                    result.stdout,
-                    result.stderr,
-                    result.term,
-                );
-            }
+        .Exited => {
+            // allow success handling below; include both streams for consistency.
         },
         else => {
             return try composeChildOutput(
@@ -2798,7 +2791,12 @@ fn runZoltCommandForMessage(
         },
     }
 
-    return try allocator.dupe(u8, result.stdout);
+    return try composeChildOutput(
+        allocator,
+        result.stdout,
+        result.stderr,
+        result.term,
+    );
 }
 
 fn buildVoltBootstrapContext(
@@ -4510,7 +4508,7 @@ test "runTelegramThroughZolt bootstraps and reuses zolt sessions" {
         \\
         \\if [ "$1" != "run" ]; then
         \\  echo "invalid" >&2
-        \\  exit 2
+        \\  exit 0
         \\fi
         \\shift
         \\
@@ -4530,7 +4528,8 @@ test "runTelegramThroughZolt bootstraps and reuses zolt sessions" {
         \\
         \\if [ "$session" = "stale" ]; then
         \\  echo "session not found: $session" >&2
-        \\  exit 2
+        \\  echo "Use /sessions in zolt to view available conversation ids." >&2
+        \\  exit 0
         \\fi
         \\
         \\if [ "$output_json" -eq 1 ]; then
