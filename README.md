@@ -52,6 +52,14 @@ volt telegram setup --home ~/.volt --token "<bot_token>"
 
 `--allow-from` is optional. If omitted, Volt allows all chats to use the bot.
 
+No `--chat-id` is needed for setup; chat ids are discovered from incoming Telegram messages.
+
+To get your chat id, send a message to the bot and inspect `chat.id` from:
+
+```bash
+curl -s "https://api.telegram.org/bot<TOKEN>/getUpdates"
+```
+
 Volt can bundle a local `zolt` checkout so `--zolt` can run without a preinstalled system `zolt` binary. When bundling is enabled, Volt prefers:
 
 1. local source via `-Dzolt-source=...` (or `../zolt` if present),
@@ -85,7 +93,16 @@ curl -H "Authorization: Bearer volt-gateway-token" \
   http://127.0.0.1:18789/invoke
 ```
 
-With `--zolt`, Volt executes `zolt run --session <session_key> {message}`.
+With `--zolt`, Volt executes `zolt run --session <session_id> {message}` and stores Telegram chat/session mappings in:
+
+`<home>/credentials/telegram-zolt-sessions.json`
+
+Behavior:
+
+- first message for a chat bootstraps a new zolt session (`zolt run --output json <message>`);
+- first successful response writes the returned `session_id` into Volt’s mapping file;
+- subsequent messages reuse that mapping via `zolt run --session <session_id> <message>`;
+- stale mappings are recreated automatically if zolt returns `session not found`.
 
 Gateway session IDs are resolved as:
 

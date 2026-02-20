@@ -15,6 +15,8 @@
   - Supports `--token`, `--account`, `--home`, `--dispatch`, `--poll-ms`.
   - Supports `--zolt` and `--zolt-path` dispatch modes.
   - Resolves command placeholders (`{message}`, `{text}`, `{chat_id}`, `{account}`, `{session}`).
+  - Bootstraps and persists `telegram:<account>:<chat_id>` -> zolt `session_id` mappings in `credentials/telegram-zolt-sessions.json`.
+  - Recreates stale zolt sessions when `session not found` is returned.
 - Local stdio passthrough mode when `volt` is run with no arguments.
 - Config/state discovery:
   - `--home` and `VOLT_HOME`, `VOLT_STATE_DIR`, `VOLT_CONFIG_PATH`.
@@ -62,6 +64,7 @@ The original reference has a much broader surface. The items below are not yet i
   - Telegram poller behavior under malformed updates and empty response handling.
   - Allowlist and token-resolution precedence end-to-end.
   - `--zolt` auto-discovery and dispatch validation failures.
+  - Telegram->zolt session bootstrap/recovery with real process execution and stale mapping repair.
 - Add optional integration tests (guarded/feature-toggled) for:
   - real Telegram API mocking/fake server response flow.
   - `volt init` file layout and mirror behavior.

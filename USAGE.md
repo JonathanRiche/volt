@@ -67,6 +67,14 @@ volt --telegram [--token <token>] [--account <id>] [--home <path>] [--dispatch <
 
 `zolt run --session {session} {message}` plus your configured message handling.
 
+Setup does not require chat ids. `--allow-from` is optional and no account-specific chat ids are configured in setup.
+
+Telegram chat ids are derived from incoming messages at runtime and mapped to zolt sessions in:
+
+- `<home>/credentials/telegram-zolt-sessions.json`
+
+Mapping key is `telegram:<account>:<chat_id>`.
+
 Run `zolt run -h` to check supported flags (for example `-s` / `--session`).
 
 `--zolt-path <path>` sets the exact executable used for zolt mode, overriding `zolt` in PATH.
@@ -84,9 +92,7 @@ Available placeholders in `--dispatch` values:
 - `{chat_id}`: Telegram chat id
 - `{account}`: normalized account id
 - `{session}`: derived session key (in priority order):
-  - explicit `session` from request payload, else
-  - `gateway:<account>:<chat_id>` if `chat_id` is provided, else
-  - `gateway:<account>`
+  - `telegram:<account>:<chat_id>` for polling mode
 
 If `{message}`/`{text}` is not present, Volt appends the message text as the final argv entry.
 

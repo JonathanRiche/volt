@@ -146,8 +146,24 @@ const GatewayRoute = enum { health, status, invoke, unknown };
 
 const GatewayError = error{ GatewayAuthMissing, GatewayBadRequest };
 const GatewayServiceError = error{ GatewayServiceUnsupportedPlatform, GatewayServiceCommandFailed };
+const VoltError = error{ZoltSessionIdMissing};
 
 const DefaultZoltDispatch = "zolt run --session {session} {message}";
+
+const TelegramZoltSessionMapEntry = struct {
+    key: []const u8,
+    session: []const u8,
+};
+
+const TelegramZoltSessionMap = struct {
+    version: u32 = 1,
+    sessions: []const TelegramZoltSessionMapEntry = &.{},
+};
+
+const ZoltRunOutput = struct {
+    session_id: []const u8,
+    response: []const u8,
+};
 
 const DispatchMode = enum { shell, argv };
 
@@ -206,6 +222,7 @@ const DefaultAllowFromJson = "{\"version\":1,\"allowFrom\":[]}";
 const DefaultOffsetJson = "{\"version\":1,\"lastUpdateId\":0}";
 const DefaultPairingJson = "{\"version\":1,\"requests\":[]}";
 const DefaultUpdateCheckJson = "{\"lastCheckedAt\":\"1970-01-01T00:00:00.000Z\"}";
+const DefaultTelegramZoltSessionsJson = "{\"version\":1,\"sessions\":[]}";
 const DefaultGatewayToken = "volt-gateway-token";
 const DefaultGatewayBind = "127.0.0.1";
 const MaxGatewayRequestSize = 64 * 1024;
@@ -884,16 +901,12 @@ fn runTelegramGateway(allocator: Allocator, opts: TelegramRunOptions) !void {
     defer allowed.deinit();
     const allow_list = allowed.value.allowFrom;
 
-    const dispatch = if (opts.zolt) dispatch_block: {
-        const zolt_cmd = try resolveZoltCommand(allocator, opts.zolt_command);
-        defer allocator.free(zolt_cmd);
+    const dispatch = if (opts.zolt) DispatchPlan{} else try parseDispatchPlan(allocator, opts.dispatch);
+    defer deinitDispatchPlan(allocator, dispatch);
 
-        const zolt_dispatch = try std.fmt.allocPrint(
-            allocator,
-            "{s} run --session {{session}} {{message}}",
-            .{zolt_cmd},
-        );
-        defer allocator.free(zolt_dispatch);
+    const zolt_cmd = if (opts.zolt) blk: {
+        const zolt_cmd = try resolveZoltCommand(allocator, opts.zolt_command);
+        errdefer allocator.free(zolt_cmd);
 
         validateDispatchExecutable(allocator, zolt_cmd) catch |err| {
             switch (err) {
@@ -919,11 +932,11 @@ fn runTelegramGateway(allocator: Allocator, opts: TelegramRunOptions) !void {
             return err;
         };
 
-        break :dispatch_block try parseDispatchPlan(allocator, zolt_dispatch);
-    } else try parseDispatchPlan(allocator, opts.dispatch);
-    defer deinitDispatchPlan(allocator, dispatch);
+        break :blk zolt_cmd;
+    } else null;
+    defer if (zolt_cmd) |command| allocator.free(command);
 
-    if (!opts.zolt and dispatch.mode == .argv and dispatch.argv.len > 0) {
+    if (dispatch.mode == .argv and dispatch.argv.len > 0) {
         validateDispatchExecutable(allocator, dispatch.argv[0]) catch |err| {
             switch (err) {
                 error.DispatchBinaryNotFound => {
@@ -979,7 +992,20 @@ fn runTelegramGateway(allocator: Allocator, opts: TelegramRunOptions) !void {
                     .session_key = session_key,
                 };
 
-                const output = executeDispatchForTelegram(allocator, dispatch, dispatch_ctx) catch |err| {
+                const output = if (zolt_cmd) |command| blk: {
+                    break :blk runTelegramThroughZolt(
+                        allocator,
+                        root,
+                        command,
+                        session_key,
+                        text,
+                    ) catch |err| {
+                        const error_msg = try std.fmt.allocPrint(allocator, "command failed: {s}", .{@errorName(err)});
+                        defer allocator.free(error_msg);
+                        try sendTelegramMessage(allocator, &client, token, chat.id, error_msg);
+                        continue;
+                    };
+                } else executeDispatchForTelegram(allocator, dispatch, dispatch_ctx) catch |err| {
                     const error_msg = try std.fmt.allocPrint(allocator, "command failed: {s}", .{@errorName(err)});
                     defer allocator.free(error_msg);
                     try sendTelegramMessage(allocator, &client, token, chat.id, error_msg);
@@ -2058,6 +2084,124 @@ fn executeDispatchForTelegram(allocator: Allocator, plan: DispatchPlan, ctx: Tel
     };
 }
 
+fn runTelegramThroughZolt(
+    allocator: Allocator,
+    root: []const u8,
+    zolt_command: []const u8,
+    session_key: []const u8,
+    message: []const u8,
+) ![]u8 {
+    const existing_session_id = blk: {
+        break :blk loadTelegramZoltSessionId(allocator, root, session_key) catch |err| {
+            std.log.warn("volt: failed to load zolt session mapping ({s}): {s}", .{ session_key, @errorName(err) });
+            break :blk null;
+        };
+    };
+    defer if (existing_session_id) |mapped_session| allocator.free(mapped_session);
+
+    if (existing_session_id) |mapped_session| {
+        const mapped_output = try runZoltCommandForMessage(
+            allocator,
+            zolt_command,
+            mapped_session,
+            message,
+            false,
+        );
+        if (!isZoltSessionNotFound(mapped_output)) {
+            return mapped_output;
+        }
+        allocator.free(mapped_output);
+        std.log.warn("volt: zolt session not found, recreating {s}", .{session_key});
+    }
+
+    const session_output = try runZoltCommandForMessage(allocator, zolt_command, null, message, true);
+    defer allocator.free(session_output);
+    const parsed = parseZoltRunJson(allocator, session_output) catch |err| {
+        std.log.warn("volt: failed to parse zolt json output ({s}): {s}", .{ session_key, @errorName(err) });
+        return try allocator.dupe(u8, session_output);
+    };
+    defer deinitZoltRunOutput(allocator, parsed);
+
+    if (parsed.session_id.len == 0) {
+        return error.ZoltSessionIdMissing;
+    }
+
+    try persistTelegramZoltSessionId(allocator, root, session_key, parsed.session_id);
+    return try allocator.dupe(u8, parsed.response);
+}
+
+fn deinitZoltRunOutput(allocator: Allocator, output: ZoltRunOutput) void {
+    allocator.free(output.session_id);
+    allocator.free(output.response);
+}
+
+fn parseZoltRunJson(allocator: Allocator, text: []const u8) !ZoltRunOutput {
+    const parsed = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        text,
+        .{ .ignore_unknown_fields = true },
+    );
+    defer parsed.deinit();
+
+    const root = &parsed.value;
+    const session_id = if (resolveJsonStringField(root, &.{"session_id"})) |raw| blk: {
+        break :blk try allocator.dupe(u8, raw);
+    } else try allocator.dupe(u8, "");
+
+    const response = if (resolveJsonStringField(root, &.{"response"})) |raw| blk: {
+        break :blk try allocator.dupe(u8, raw);
+    } else try allocator.dupe(u8, "");
+
+    return ZoltRunOutput{
+        .session_id = session_id,
+        .response = response,
+    };
+}
+
+fn isZoltSessionNotFound(output: []const u8) bool {
+    return std.mem.indexOf(u8, output, "session not found:") != null;
+}
+
+fn runZoltCommandForMessage(
+    allocator: Allocator,
+    zolt_command: []const u8,
+    session_id: ?[]const u8,
+    message: []const u8,
+    include_json_output: bool,
+) ![]u8 {
+    var argv = std.ArrayListUnmanaged([]const u8){};
+    defer argv.deinit(allocator);
+
+    try argv.append(allocator, zolt_command);
+    try argv.append(allocator, "run");
+    if (session_id) |session| {
+        try argv.append(allocator, "--session");
+        try argv.append(allocator, session);
+    }
+    if (include_json_output) {
+        try argv.append(allocator, "--output");
+        try argv.append(allocator, "json");
+    }
+    try argv.append(allocator, message);
+
+    const result = try std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = argv.items,
+    });
+    defer {
+        allocator.free(result.stdout);
+        allocator.free(result.stderr);
+    }
+
+    return try composeChildOutput(
+        allocator,
+        result.stdout,
+        result.stderr,
+        result.term,
+    );
+}
+
 fn executeDispatchCommand(allocator: Allocator, argv: []const []const u8, ctx: TelegramDispatchContext) ![]u8 {
     if (argv.len == 0) {
         return error.InvalidArgument;
@@ -2626,6 +2770,110 @@ fn loadOffset(allocator: Allocator, root: []const u8, account: []const u8) !i64 
     return parsed.value.lastUpdateId;
 }
 
+fn resolveTelegramZoltSessionPath(allocator: Allocator, root: []const u8) ![]u8 {
+    return joinPath(allocator, root, "credentials/telegram-zolt-sessions.json");
+}
+
+fn loadTelegramZoltSessionId(
+    allocator: Allocator,
+    root: []const u8,
+    key: []const u8,
+) !?[]u8 {
+    const path = try resolveTelegramZoltSessionPath(allocator, root);
+    defer allocator.free(path);
+
+    const data = readFileAlloc(allocator, path) catch |err| {
+        if (err == error.FileNotFound) return null;
+        return err;
+    };
+    defer allocator.free(data);
+
+    const parsed = try std.json.parseFromSlice(
+        TelegramZoltSessionMap,
+        allocator,
+        data,
+        .{ .ignore_unknown_fields = true },
+    );
+    defer parsed.deinit();
+
+    for (parsed.value.sessions) |entry| {
+        if (std.mem.eql(u8, entry.key, key)) {
+            return try allocator.dupe(u8, entry.session);
+        }
+    }
+    return null;
+}
+
+fn persistTelegramZoltSessionId(
+    allocator: Allocator,
+    root: []const u8,
+    key: []const u8,
+    session_id: []const u8,
+) !void {
+    const path = try resolveTelegramZoltSessionPath(allocator, root);
+    defer allocator.free(path);
+
+    const path_exists = pathExists(path);
+    const data = blk: {
+        if (!path_exists) break :blk DefaultTelegramZoltSessionsJson;
+        break :blk readFileAlloc(allocator, path) catch |err| switch (err) {
+            error.FileNotFound => DefaultTelegramZoltSessionsJson,
+            else => return err,
+        };
+    };
+    defer if (path_exists) allocator.free(data);
+
+    const parsed = try std.json.parseFromSlice(
+        TelegramZoltSessionMap,
+        allocator,
+        data,
+        .{ .ignore_unknown_fields = true },
+    );
+    defer parsed.deinit();
+
+    var sessions = std.ArrayListUnmanaged(TelegramZoltSessionMapEntry){};
+    defer sessions.deinit(allocator);
+
+    var found = false;
+    for (parsed.value.sessions) |entry| {
+        if (std.mem.eql(u8, entry.key, key)) {
+            if (!std.mem.eql(u8, entry.session, session_id)) {
+                try sessions.append(allocator, .{
+                    .key = key,
+                    .session = session_id,
+                });
+            } else {
+                try sessions.append(allocator, entry);
+            }
+            found = true;
+            continue;
+        }
+        try sessions.append(allocator, entry);
+    }
+
+    if (!found) {
+        try sessions.append(allocator, .{ .key = key, .session = session_id });
+    }
+
+    const merged = TelegramZoltSessionMap{
+        .version = 1,
+        .sessions = sessions.items,
+    };
+
+    var out = std.Io.Writer.Allocating.init(allocator);
+    defer out.deinit();
+
+    var writer = std.json.Stringify{
+        .writer = &out.writer,
+        .options = .{},
+    };
+    try writer.write(merged);
+
+    const payload = try out.toOwnedSlice();
+    defer allocator.free(payload);
+    try writeTextFile(path, payload, true);
+}
+
 fn persistOffset(allocator: Allocator, root: []const u8, account: []const u8, offset: i64) !void {
     const path = try resolveTelegramOffsetPath(allocator, root, account);
     defer allocator.free(path);
@@ -3041,4 +3289,132 @@ test "resolveTelegramOffsetPath uses account-specific naming" {
     const account_path = try resolveTelegramOffsetPath(allocator, "/workspace", "work");
     defer allocator.free(account_path);
     try testing.expectEqualStrings("/workspace/telegram/update-offset-work.json", account_path);
+}
+
+test "parseZoltRunJson reads session_id and response" {
+    const allocator = testing.allocator;
+    const payload = "{\"session_id\":\"sess_123\",\"response\":\"hello\"}";
+
+    const parsed = try parseZoltRunJson(allocator, payload);
+    defer deinitZoltRunOutput(allocator, parsed);
+
+    try testing.expectEqualStrings("sess_123", parsed.session_id);
+    try testing.expectEqualStrings("hello", parsed.response);
+}
+
+test "parseZoltRunJson handles missing fields" {
+    const allocator = testing.allocator;
+
+    const parsed = try parseZoltRunJson(allocator, "{}");
+    defer deinitZoltRunOutput(allocator, parsed);
+
+    try testing.expectEqualStrings("", parsed.session_id);
+    try testing.expectEqualStrings("", parsed.response);
+}
+
+test "isZoltSessionNotFound detects session error output" {
+    try testing.expect(isZoltSessionNotFound("session not found: telegram:default:1"));
+    try testing.expect(!isZoltSessionNotFound("all good"));
+}
+
+test "telegram zolt session map persists across loads" {
+    const allocator = testing.allocator;
+    const root = try std.fmt.allocPrint(allocator, "/tmp/volt-zolt-map-test-{d}", .{std.time.milliTimestamp()});
+    defer allocator.free(root);
+
+    try std.fs.makeDirAbsolute(root);
+    defer std.fs.deleteTreeAbsolute(root) catch {};
+
+    const key = "telegram:default:777";
+    try persistTelegramZoltSessionId(allocator, root, key, "session_1");
+
+    const loaded_first = try loadTelegramZoltSessionId(allocator, root, key);
+    defer if (loaded_first) |value| allocator.free(value);
+    try testing.expectEqualStrings("session_1", loaded_first.?);
+
+    try persistTelegramZoltSessionId(allocator, root, key, "session_2");
+    const loaded_second = try loadTelegramZoltSessionId(allocator, root, key);
+    defer if (loaded_second) |value| allocator.free(value);
+    try testing.expectEqualStrings("session_2", loaded_second.?);
+
+    const unknown = try loadTelegramZoltSessionId(allocator, root, "missing");
+    try testing.expect(unknown == null);
+}
+
+test "runTelegramThroughZolt bootstraps and reuses zolt sessions" {
+    const allocator = testing.allocator;
+    const root = try std.fmt.allocPrint(allocator, "/tmp/volt-zolt-run-test-{d}", .{std.time.milliTimestamp()});
+    defer allocator.free(root);
+
+    try std.fs.makeDirAbsolute(root);
+    defer std.fs.deleteTreeAbsolute(root) catch {};
+
+    const zolt_command = try joinPath(allocator, root, "zolt");
+    defer allocator.free(zolt_command);
+
+    var script = try std.fs.createFileAbsolute(zolt_command, .{
+        .truncate = true,
+        .mode = 0o755,
+    });
+    const script_body =
+        \\#!/bin/sh
+        \\
+        \\if [ "$1" != "run" ]; then
+        \\  echo "invalid" >&2
+        \\  exit 2
+        \\fi
+        \\shift
+        \\
+        \\session=""
+        \\if [ "$1" = "--session" ]; then
+        \\  session="$2"
+        \\  shift 2
+        \\fi
+        \\
+        \\output_json=0
+        \\if [ "$1" = "--output" ] && [ "$2" = "json" ]; then
+        \\  output_json=1
+        \\  shift 2
+        \\fi
+        \\
+        \\message="$1"
+        \\
+        \\if [ "$output_json" -eq 1 ]; then
+        \\  if [ -z "$session" ]; then
+        \\    session="session_$message"
+        \\  fi
+        \\  printf '{"session_id":"%s","response":"reply:%s"}' "$session" "$message"
+        \\  exit 0
+        \\fi
+        \\
+        \\if [ "$session" = "stale" ]; then
+        \\  echo "session not found: $session" >&2
+        \\  exit 2
+        \\fi
+        \\printf "ok:$session:$message"
+    ;
+    try script.writeAll(script_body);
+    script.close();
+
+    const session_key = "telegram:default:1111";
+    const response_one = try runTelegramThroughZolt(allocator, root, zolt_command, session_key, "hello");
+    defer allocator.free(response_one);
+    try testing.expectEqualStrings("reply:hello", response_one);
+
+    const session_one = try loadTelegramZoltSessionId(allocator, root, session_key);
+    defer if (session_one) |session| allocator.free(session);
+    try testing.expectEqualStrings("session_hello", session_one.?);
+
+    const response_two = try runTelegramThroughZolt(allocator, root, zolt_command, session_key, "again");
+    defer allocator.free(response_two);
+    try testing.expectEqualStrings("ok:session_hello:again", response_two);
+
+    try persistTelegramZoltSessionId(allocator, root, session_key, "stale");
+    const response_three = try runTelegramThroughZolt(allocator, root, zolt_command, session_key, "fixed");
+    defer allocator.free(response_three);
+    try testing.expectEqualStrings("reply:fixed", response_three);
+
+    const session_three = try loadTelegramZoltSessionId(allocator, root, session_key);
+    defer if (session_three) |session| allocator.free(session);
+    try testing.expectEqualStrings("session_fixed", session_three.?);
 }
