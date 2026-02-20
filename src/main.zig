@@ -1169,7 +1169,6 @@ fn runTelegramGateway(allocator: Allocator, opts: TelegramRunOptions) !void {
 
                 const output = if (extractTelegramSlashCommand(text)) |command| out: {
                     const result = runWithTypingPulse(
-                        allocator,
                         token,
                         chat.id,
                         executeTelegramSlashCommand,
@@ -1184,7 +1183,6 @@ fn runTelegramGateway(allocator: Allocator, opts: TelegramRunOptions) !void {
                     break :out result;
                 } else if (zolt_cmd) |command| out: {
                     const result = runWithTypingPulse(
-                        allocator,
                         token,
                         chat.id,
                         runTelegramThroughZolt,
@@ -1199,7 +1197,6 @@ fn runTelegramGateway(allocator: Allocator, opts: TelegramRunOptions) !void {
                     break :out result;
                 } else out: {
                     const result = runWithTypingPulse(
-                        allocator,
                         token,
                         chat.id,
                         executeDispatchForTelegram,
@@ -3235,7 +3232,6 @@ fn sendTelegramApiRequest(
 }
 
 fn runWithTypingPulse(
-    allocator: Allocator,
     token: []const u8,
     chat_id: i64,
     comptime func: anytype,
@@ -3243,7 +3239,6 @@ fn runWithTypingPulse(
 ) ![]u8 {
     var stop_signal = std.atomic.Value(bool).init(false);
     const typing_thread = startTypingPulse(
-        allocator,
         token,
         chat_id,
         &stop_signal,
@@ -3259,13 +3254,11 @@ fn runWithTypingPulse(
 }
 
 fn startTypingPulse(
-    allocator: Allocator,
     token: []const u8,
     chat_id: i64,
     stop_signal: *std.atomic.Value(bool),
 ) !std.Thread {
     return try std.Thread.spawn(.{}, sendTypingPulse, .{
-        allocator,
         token,
         chat_id,
         stop_signal,
@@ -3274,14 +3267,13 @@ fn startTypingPulse(
 }
 
 fn sendTypingPulse(
-    allocator: Allocator,
     token: []const u8,
     chat_id: i64,
     stop_signal: *std.atomic.Value(bool),
     interval_ms: u64,
 ) void {
     while (!stop_signal.load(.seq_cst)) {
-        sendTelegramChatAction(allocator, token, chat_id, TelegramChatActionTyping) catch |err| {
+        sendTelegramChatAction(std.heap.smp_allocator, token, chat_id, TelegramChatActionTyping) catch |err| {
             std.log.warn("volt: telegram typing action failed for chat {d} ({s})", .{
                 chat_id,
                 @errorName(err),
