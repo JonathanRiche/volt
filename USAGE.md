@@ -75,6 +75,15 @@ Telegram chat ids are derived from incoming messages at runtime and mapped to zo
 
 Mapping key is `telegram:<account>:<chat_id>`.
 
+Slash commands are available in Telegram and are registered as command menu entries:
+
+- `/help` - show quick usage
+- `/commands` - list available commands
+- `/sessions` - show active zolt session for this chat
+- `/status` - show runtime status
+- `/reset` - clear this chat's zolt session mapping
+- `/models` - run `zolt models` (requires `--zolt`)
+
 Run `zolt run -h` to check supported flags (for example `-s` / `--session`).
 
 `--zolt-path <path>` sets the exact executable used for zolt mode, overriding `zolt` in PATH.

@@ -54,6 +54,16 @@ volt telegram setup --home ~/.volt --token "<bot_token>"
 
 No `--chat-id` is needed for setup; chat ids are discovered from incoming Telegram messages.
 
+Volt also registers a Telegram slash-command menu (`/help`, `/commands`, `/sessions`, `/status`, `/reset`, `/models`) when the gateway starts, so you can discover commands in the Telegram UI.
+
+In Telegram, send:
+- `/help` to view the menu summary
+- `/commands` for the full command list
+- `/sessions` to show the mapped zolt session for this chat
+- `/status` to show runtime details
+- `/reset` to clear the mapped zolt session
+- `/models` to run the zolt model command (requires `--zolt`)
+
 To get your chat id, send a message to the bot and inspect `chat.id` from:
 
 ```bash

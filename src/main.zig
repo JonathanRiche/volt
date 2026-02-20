@@ -150,6 +150,25 @@ const VoltError = error{ZoltSessionIdMissing};
 
 const DefaultZoltDispatch = "zolt run --session {session} {message}";
 
+const TelegramSlashCommand = struct {
+    command: []const u8,
+    args: []const u8,
+};
+
+const TelegramSlashCommandInfo = struct {
+    command: []const u8,
+    description: []const u8,
+};
+
+const VoltTelegramSlashCommands = [_]TelegramSlashCommandInfo{
+    .{ .command = "help", .description = "Show Volt command help" },
+    .{ .command = "commands", .description = "Show Volt command menu" },
+    .{ .command = "sessions", .description = "Show the active zolt session for this chat" },
+    .{ .command = "status", .description = "Show runtime status for this chat" },
+    .{ .command = "reset", .description = "Reset the active zolt session for this chat" },
+    .{ .command = "models", .description = "Show available model information (zolt mode)" },
+};
+
 const TelegramZoltSessionMapEntry = struct {
     key: []const u8,
     session: []const u8,
@@ -206,6 +225,11 @@ const TelegramUpdate = struct {
 const TelegramUpdates = struct {
     ok: bool = false,
     result: []const TelegramUpdate = &.{},
+};
+
+const TelegramCommandsResponse = struct {
+    ok: bool = false,
+    description: ?[]const u8 = null,
 };
 
 const TelegramUpdatesEnvelope = struct {
@@ -965,6 +989,10 @@ fn runTelegramGateway(allocator: Allocator, opts: TelegramRunOptions) !void {
     var client = std.http.Client{ .allocator = allocator };
     defer client.deinit();
 
+    registerTelegramCommands(allocator, &client, token) catch |err| {
+        std.log.warn("volt: failed to register telegram slash commands: {s}", .{@errorName(err)});
+    };
+
     var current_offset = try loadOffset(allocator, root, account);
 
     while (true) {
@@ -991,6 +1019,31 @@ fn runTelegramGateway(allocator: Allocator, opts: TelegramRunOptions) !void {
                     .chat_id = chat.id,
                     .session_key = session_key,
                 };
+
+                if (extractTelegramSlashCommand(text)) |command| {
+                    const output = executeTelegramSlashCommand(
+                        allocator,
+                        command,
+                        root,
+                        session_key,
+                        account,
+                        chat.id,
+                        zolt_cmd,
+                    ) catch |err| {
+                        const error_msg = try std.fmt.allocPrint(allocator, "command failed: {s}", .{@errorName(err)});
+                        defer allocator.free(error_msg);
+                        try sendTelegramMessage(allocator, &client, token, chat.id, error_msg);
+                        next_offset = @max(next_offset, update.update_id + 1);
+                        continue;
+                    };
+                    defer allocator.free(output);
+
+                    const response_text = if (output.len == 0) "(no output)" else output;
+                    const clipped = if (response_text.len > 3800) response_text[0..3800] else response_text;
+                    try sendTelegramMessage(allocator, &client, token, chat.id, clipped);
+                    next_offset = @max(next_offset, update.update_id + 1);
+                    continue;
+                }
 
                 const output = if (zolt_cmd) |command| blk: {
                     break :blk runTelegramThroughZolt(
@@ -1028,6 +1081,221 @@ fn runTelegramGateway(allocator: Allocator, opts: TelegramRunOptions) !void {
         }
 
         std.Thread.sleep(clampPollInterval(opts.poll_ms) * std.time.ns_per_ms);
+    }
+}
+
+fn extractTelegramSlashCommand(text: []const u8) ?TelegramSlashCommand {
+    const trimmed = std.mem.trim(u8, text, " \t\r\n");
+    if (trimmed.len == 0 or trimmed[0] != '/') return null;
+    if (trimmed.len == 1) return null;
+
+    var end: usize = 1;
+    while (end < trimmed.len and !std.ascii.isWhitespace(trimmed[end])) {
+        end += 1;
+    }
+
+    const raw_command_token = trimmed[1..end];
+    if (raw_command_token.len == 0) return null;
+
+    const command = if (std.mem.indexOfScalar(u8, raw_command_token, '@')) |at|
+        raw_command_token[0..at]
+    else
+        raw_command_token;
+    if (command.len == 0) return null;
+
+    const command_args = if (end < trimmed.len)
+        std.mem.trim(u8, trimmed[end..], " \t\r\n")
+    else
+        "";
+
+    return TelegramSlashCommand{
+        .command = command,
+        .args = command_args,
+    };
+}
+
+fn executeTelegramSlashCommand(
+    allocator: Allocator,
+    command: TelegramSlashCommand,
+    root: []const u8,
+    session_key: []const u8,
+    account: []const u8,
+    chat_id: i64,
+    zolt_cmd: ?[]const u8,
+) ![]u8 {
+    if (isTelegramSlashCommand(command.command, "help") or isTelegramSlashCommand(command.command, "?")) {
+        return renderTelegramSlashHelp(allocator);
+    }
+
+    if (isTelegramSlashCommand(command.command, "commands") or isTelegramSlashCommand(command.command, "menu")) {
+        return renderTelegramSlashCommands(allocator);
+    }
+
+    if (isTelegramSlashCommand(command.command, "sessions") or isTelegramSlashCommand(command.command, "session")) {
+        const mapped = loadTelegramZoltSessionId(allocator, root, session_key) catch null;
+        defer if (mapped) |session| allocator.free(session);
+
+        if (mapped) |session| {
+            return try std.fmt.allocPrint(allocator, "chat {d} session: {s}", .{ chat_id, session });
+        }
+        return try std.fmt.allocPrint(allocator, "chat {d} has no active zolt session", .{chat_id});
+    }
+
+    if (isTelegramSlashCommand(command.command, "status")) {
+        const mapped = loadTelegramZoltSessionId(allocator, root, session_key) catch null;
+        defer if (mapped) |session| allocator.free(session);
+
+        const mapped_value = if (mapped) |session| session else "none";
+        const zolt_label = zolt_cmd orelse "(not configured)";
+
+        return try std.fmt.allocPrint(
+            allocator,
+            "Volt status\naccount: {s}\nchat: {d}\nsession-key: {s}\nzolt-session: {s}\nzolt-command: {s}\n",
+            .{ account, chat_id, session_key, mapped_value, zolt_label },
+        );
+    }
+
+    if (isTelegramSlashCommand(command.command, "reset") or isTelegramSlashCommand(command.command, "new")) {
+        const cleared = try clearTelegramZoltSessionId(allocator, root, session_key);
+        if (cleared) {
+            return try allocator.dupe(u8, "zolt session reset for this chat");
+        }
+        return try allocator.dupe(u8, "no active zolt session found for this chat");
+    }
+
+    if (isTelegramSlashCommand(command.command, "models")) {
+        if (zolt_cmd) |command_bin| {
+            return runZoltModelsCommand(allocator, command_bin);
+        }
+        return try allocator.dupe(u8, "models command requires --zolt mode");
+    }
+
+    return try std.fmt.allocPrint(allocator, "unknown command: /{s}. /help for available commands.", .{command.command});
+}
+
+fn isTelegramSlashCommand(value: []const u8, expected: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(value, expected);
+}
+
+fn renderTelegramSlashCommands(allocator: Allocator) ![]u8 {
+    var out = std.ArrayListUnmanaged(u8){};
+    defer out.deinit(allocator);
+
+    try out.appendSlice(allocator, "Volt commands:\n");
+    for (VoltTelegramSlashCommands) |entry| {
+        try out.appendSlice(allocator, " /");
+        try out.appendSlice(allocator, entry.command);
+        if (entry.description.len > 0) {
+            try out.appendSlice(allocator, " - ");
+            try out.appendSlice(allocator, entry.description);
+        }
+        try out.append(allocator, '\n');
+    }
+    try out.appendSlice(allocator, "/help, /? - this message");
+    return out.toOwnedSlice(allocator);
+}
+
+fn renderTelegramSlashHelp(allocator: Allocator) ![]u8 {
+    return try allocator.dupe(
+        u8,
+        "Volt Telegram bot commands:\n" ++
+            "/commands - show command list\n" ++
+            "/sessions - show mapped zolt session\n" ++
+            "/status - show runtime status\n" ++
+            "/reset - clear mapped zolt session\n" ++
+            "/models - show zolt model info\n",
+    );
+}
+
+fn runZoltModelsCommand(allocator: Allocator, zolt_cmd: []const u8) ![]u8 {
+    const argv = [_][]const u8{ zolt_cmd, "models" };
+    const result = try std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &argv,
+    });
+    defer {
+        allocator.free(result.stdout);
+        allocator.free(result.stderr);
+    }
+
+    return try composeChildOutput(
+        allocator,
+        result.stdout,
+        result.stderr,
+        result.term,
+    );
+}
+
+fn registerTelegramCommands(allocator: Allocator, client: *std.http.Client, token: []const u8) !void {
+    var payload = std.ArrayListUnmanaged(u8){};
+    defer payload.deinit(allocator);
+
+    try payload.appendSlice(allocator, "{\"commands\":[");
+    for (VoltTelegramSlashCommands, 0..) |entry, index| {
+        if (index > 0) {
+            try payload.appendSlice(allocator, ",");
+        }
+        try payload.appendSlice(allocator, "{\"command\":\"");
+        try appendTelegramJsonEscape(allocator, &payload, entry.command);
+        try payload.appendSlice(allocator, "\",\"description\":\"");
+        try appendTelegramJsonEscape(allocator, &payload, entry.description);
+        try payload.appendSlice(allocator, "\"}");
+    }
+    try payload.appendSlice(allocator, "]}");
+
+    const payload_text = try payload.toOwnedSlice(allocator);
+    defer allocator.free(payload_text);
+
+    var url_buf: [512]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "https://api.telegram.org/bot{s}/setMyCommands", .{token});
+
+    var response = std.Io.Writer.Allocating.init(allocator);
+    defer response.deinit();
+
+    const result = try client.fetch(.{
+        .location = .{ .url = url },
+        .method = .POST,
+        .payload = payload_text,
+        .response_writer = &response.writer,
+        .extra_headers = &[_]std.http.Header{
+            .{ .name = "content-type", .value = "application/json" },
+        },
+    });
+
+    if (result.status != .ok) {
+        return error.TelegramRequestFailed;
+    }
+
+    const response_text = try response.toOwnedSlice();
+    defer allocator.free(response_text);
+
+    const parsed = std.json.parseFromSlice(
+        TelegramCommandsResponse,
+        allocator,
+        response_text,
+        .{ .ignore_unknown_fields = true },
+    ) catch return error.TelegramRequestFailed;
+    defer parsed.deinit();
+
+    if (!parsed.value.ok) {
+        return error.TelegramRequestFailed;
+    }
+}
+
+fn appendTelegramJsonEscape(
+    allocator: Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    value: []const u8,
+) !void {
+    for (value) |byte| {
+        switch (byte) {
+            '\"' => try out.appendSlice(allocator, "\\\""),
+            '\\' => try out.appendSlice(allocator, "\\\\"),
+            '\n' => try out.appendSlice(allocator, "\\n"),
+            '\r' => try out.appendSlice(allocator, "\\r"),
+            '\t' => try out.appendSlice(allocator, "\\t"),
+            else => try out.append(allocator, byte),
+        }
     }
 }
 
@@ -2898,6 +3166,62 @@ fn loadTelegramZoltSessionId(
     return null;
 }
 
+fn clearTelegramZoltSessionId(
+    allocator: Allocator,
+    root: []const u8,
+    key: []const u8,
+) !bool {
+    const path = try resolveTelegramZoltSessionPath(allocator, root);
+    defer allocator.free(path);
+
+    const data = readFileAlloc(allocator, path) catch |err| {
+        if (err == error.FileNotFound) return false;
+        return err;
+    };
+    defer allocator.free(data);
+
+    const parsed = try std.json.parseFromSlice(
+        TelegramZoltSessionMap,
+        allocator,
+        data,
+        .{ .ignore_unknown_fields = true },
+    );
+    defer parsed.deinit();
+
+    var sessions = std.ArrayListUnmanaged(TelegramZoltSessionMapEntry){};
+    defer sessions.deinit(allocator);
+
+    var removed = false;
+    for (parsed.value.sessions) |entry| {
+        if (std.mem.eql(u8, entry.key, key)) {
+            removed = true;
+            continue;
+        }
+        try sessions.append(allocator, entry);
+    }
+
+    if (!removed) return false;
+
+    const merged = TelegramZoltSessionMap{
+        .version = 1,
+        .sessions = sessions.items,
+    };
+
+    var out = std.Io.Writer.Allocating.init(allocator);
+    defer out.deinit();
+
+    var writer = std.json.Stringify{
+        .writer = &out.writer,
+        .options = .{},
+    };
+    try writer.write(merged);
+
+    const payload = try out.toOwnedSlice();
+    defer allocator.free(payload);
+    try writeTextFile(path, payload, true);
+    return true;
+}
+
 fn persistTelegramZoltSessionId(
     allocator: Allocator,
     root: []const u8,
@@ -3356,6 +3680,101 @@ test "parseCommandLineTokens strips single and double quoted tokens" {
     try testing.expectEqualStrings("echo", tokens[0]);
     try testing.expectEqualStrings("hello", tokens[1]);
     try testing.expectEqualStrings("world", tokens[2]);
+}
+
+test "extractTelegramSlashCommand parses slash commands" {
+    const command = extractTelegramSlashCommand("/help");
+    try testing.expect(command != null);
+    try testing.expectEqualStrings("help", command.?.command);
+    try testing.expectEqualStrings("", command.?.args);
+
+    const with_args = extractTelegramSlashCommand("/sessions@VoltBot 11111");
+    try testing.expect(with_args != null);
+    try testing.expectEqualStrings("sessions", with_args.?.command);
+    try testing.expectEqualStrings("11111", with_args.?.args);
+
+    try testing.expect(extractTelegramSlashCommand("not slash") == null);
+}
+
+test "executeTelegramSlashCommand can render status and clear sessions" {
+    const allocator = testing.allocator;
+    const root = try std.fmt.allocPrint(allocator, "/tmp/volt-slash-command-test-{d}", .{std.time.milliTimestamp()});
+    defer allocator.free(root);
+
+    try std.fs.makeDirAbsolute(root);
+    defer std.fs.deleteTreeAbsolute(root) catch {};
+
+    const session_key = "telegram:default:111";
+    const response_sessions = try executeTelegramSlashCommand(
+        allocator,
+        .{ .command = "sessions", .args = "" },
+        root,
+        session_key,
+        "default",
+        111,
+        null,
+    );
+    defer allocator.free(response_sessions);
+    try testing.expect(std.mem.eql(u8, response_sessions, "chat 111 has no active zolt session"));
+
+    try persistTelegramZoltSessionId(allocator, root, session_key, "z123");
+    const response_after_set = try executeTelegramSlashCommand(
+        allocator,
+        .{ .command = "sessions", .args = "" },
+        root,
+        session_key,
+        "default",
+        111,
+        null,
+    );
+    defer allocator.free(response_after_set);
+    try testing.expect(std.mem.eql(u8, response_after_set, "chat 111 session: z123"));
+
+    const reset_result = try executeTelegramSlashCommand(
+        allocator,
+        .{ .command = "reset", .args = "" },
+        root,
+        session_key,
+        "default",
+        111,
+        null,
+    );
+    defer allocator.free(reset_result);
+    try testing.expect(std.mem.eql(u8, reset_result, "zolt session reset for this chat"));
+
+    const response_sessions_after_reset = try executeTelegramSlashCommand(
+        allocator,
+        .{ .command = "sessions", .args = "" },
+        root,
+        session_key,
+        "default",
+        111,
+        null,
+    );
+    defer allocator.free(response_sessions_after_reset);
+    try testing.expect(std.mem.eql(u8, response_sessions_after_reset, "chat 111 has no active zolt session"));
+}
+
+test "clearTelegramZoltSessionId updates persisted sessions" {
+    const allocator = testing.allocator;
+    const root = try std.fmt.allocPrint(allocator, "/tmp/volt-clear-session-test-{d}", .{std.time.milliTimestamp()});
+    defer allocator.free(root);
+
+    try std.fs.makeDirAbsolute(root);
+    defer std.fs.deleteTreeAbsolute(root) catch {};
+
+    try persistTelegramZoltSessionId(allocator, root, "telegram:default:1", "s1");
+    try persistTelegramZoltSessionId(allocator, root, "telegram:default:2", "s2");
+
+    const first = try clearTelegramZoltSessionId(allocator, root, "telegram:default:1");
+    try testing.expect(first);
+
+    const remaining = try loadTelegramZoltSessionId(allocator, root, "telegram:default:1");
+    defer if (remaining) |session| allocator.free(session);
+    try testing.expect(remaining == null);
+
+    const second = try clearTelegramZoltSessionId(allocator, root, "missing");
+    try testing.expect(!second);
 }
 
 test "chatAllowed supports default open and allowlist matching" {
