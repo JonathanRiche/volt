@@ -188,6 +188,9 @@ const TelegramZoltRunMetadataEntry = struct {
     prompt_tokens: ?u64 = null,
     completion_tokens: ?u64 = null,
     total_tokens: ?u64 = null,
+    context_window_tokens: ?u64 = null,
+    context_left_percent: ?u64 = null,
+    compact_count: ?u64 = null,
     updated_at_ms: i64 = 0,
 };
 
@@ -202,6 +205,9 @@ const TelegramZoltRunMetadata = struct {
     prompt_tokens: ?u64,
     completion_tokens: ?u64,
     total_tokens: ?u64,
+    context_window_tokens: ?u64,
+    context_left_percent: ?u64,
+    compact_count: ?u64,
     updated_at_ms: i64,
 
     fn deinit(self: TelegramZoltRunMetadata, allocator: Allocator) void {
@@ -216,9 +222,12 @@ const ZoltRunOutput = struct {
     final_response: []const u8,
     provider: []const u8,
     model: []const u8,
-    prompt_tokens: ?u64,
-    completion_tokens: ?u64,
-    total_tokens: ?u64,
+    prompt_tokens: ?u64 = null,
+    completion_tokens: ?u64 = null,
+    total_tokens: ?u64 = null,
+    context_window_tokens: ?u64 = null,
+    context_left_percent: ?u64 = null,
+    compact_count: ?u64 = null,
 };
 
 const DispatchMode = enum { shell, argv };
@@ -1646,6 +1655,27 @@ fn executeTelegramSlashCommand(
         const prompt_tokens_value = if (metadata) |meta| meta.prompt_tokens else null;
         const completion_tokens_value = if (metadata) |meta| meta.completion_tokens else null;
         const total_tokens_value = if (metadata) |meta| meta.total_tokens else null;
+        var context_window_tokens_value = if (metadata) |meta| meta.context_window_tokens else null;
+        var context_left_percent_value = if (metadata) |meta| meta.context_left_percent else null;
+        const compact_count_value = if (metadata) |meta| meta.compact_count else null;
+
+        if (context_window_tokens_value == null and zolt_cmd != null and metadata != null) {
+            const resolved_window = resolveModelContextWindowFromZolt(
+                allocator,
+                zolt_cmd.?,
+                provider_value,
+                model_value,
+            ) catch null;
+            if (resolved_window) |window| {
+                context_window_tokens_value = window;
+            }
+        }
+        if (context_left_percent_value == null and context_window_tokens_value != null and total_tokens_value != null) {
+            context_left_percent_value = computeContextLeftPercent(
+                total_tokens_value.?,
+                context_window_tokens_value.?,
+            );
+        }
 
         const usage_summary = try formatTokenUsageSummary(
             allocator,
@@ -1654,19 +1684,31 @@ fn executeTelegramSlashCommand(
             total_tokens_value,
         );
         defer allocator.free(usage_summary);
+        const context_left_summary = try formatContextLeftSummary(
+            allocator,
+            context_left_percent_value,
+            context_window_tokens_value,
+        );
+        defer allocator.free(context_left_summary);
+        const compact_count_summary = try formatOptionalTokenCount(compact_count_value, allocator);
+        defer allocator.free(compact_count_summary);
+        const formatted_chat = try formatSignedI64WithCommas(allocator, chat_id);
+        defer allocator.free(formatted_chat);
 
         return try std.fmt.allocPrint(
             allocator,
-            "Volt status\naccount: {s}\nchat: {d}\nsession-key: {s}\nzolt-session: {s}\nzolt-command: {s}\nprovider: {s}\nmodel: {s}\nlast-token-usage: {s}\n",
+            "Volt status\naccount: {s}\nchat: {s}\nsession-key: {s}\nzolt-session: {s}\nzolt-command: {s}\nprovider: {s}\nmodel: {s}\nlast-token-usage: {s}\ncontext-left: {s}\ncompactions: {s}\n",
             .{
                 account,
-                chat_id,
+                formatted_chat,
                 session_key,
                 mapped_value,
                 zolt_label,
                 provider_value,
                 model_value,
                 usage_summary,
+                context_left_summary,
+                compact_count_summary,
             },
         );
     }
@@ -1700,22 +1742,13 @@ fn formatTokenUsageSummary(
     completion_tokens: ?u64,
     total_tokens: ?u64,
 ) ![]u8 {
-    const prompt_text = if (prompt_tokens) |value|
-        try std.fmt.allocPrint(allocator, "{d}", .{value})
-    else
-        try allocator.dupe(u8, "unknown");
+    const prompt_text = try formatOptionalTokenCount(prompt_tokens, allocator);
     defer allocator.free(prompt_text);
 
-    const completion_text = if (completion_tokens) |value|
-        try std.fmt.allocPrint(allocator, "{d}", .{value})
-    else
-        try allocator.dupe(u8, "unknown");
+    const completion_text = try formatOptionalTokenCount(completion_tokens, allocator);
     defer allocator.free(completion_text);
 
-    const total_text = if (total_tokens) |value|
-        try std.fmt.allocPrint(allocator, "{d}", .{value})
-    else
-        try allocator.dupe(u8, "unknown");
+    const total_text = try formatOptionalTokenCount(total_tokens, allocator);
     defer allocator.free(total_text);
 
     return std.fmt.allocPrint(
@@ -1723,6 +1756,121 @@ fn formatTokenUsageSummary(
         "prompt={s} completion={s} total={s}",
         .{ prompt_text, completion_text, total_text },
     );
+}
+
+fn formatContextLeftSummary(
+    allocator: Allocator,
+    context_left_percent: ?u64,
+    context_window_tokens: ?u64,
+) ![]u8 {
+    const percent_text = if (context_left_percent) |value|
+        try std.fmt.allocPrint(allocator, "{d}%", .{value})
+    else
+        try allocator.dupe(u8, "unknown");
+    defer allocator.free(percent_text);
+
+    const window_text = try formatOptionalTokenCount(context_window_tokens, allocator);
+    defer allocator.free(window_text);
+    return std.fmt.allocPrint(allocator, "{s} (window={s})", .{ percent_text, window_text });
+}
+
+fn formatOptionalTokenCount(value: ?u64, allocator: Allocator) ![]u8 {
+    if (value) |raw| {
+        return formatUnsignedWithCommas(allocator, raw);
+    }
+    return allocator.dupe(u8, "unknown");
+}
+
+fn formatSignedI64WithCommas(allocator: Allocator, value: i64) ![]u8 {
+    if (value < 0) {
+        const abs_value: u64 = @intCast(-value);
+        const magnitude = try formatUnsignedWithCommas(allocator, abs_value);
+        defer allocator.free(magnitude);
+        return std.fmt.allocPrint(allocator, "-{s}", .{magnitude});
+    }
+    return formatUnsignedWithCommas(allocator, @intCast(value));
+}
+
+fn formatUnsignedWithCommas(allocator: Allocator, value: u64) ![]u8 {
+    const raw = try std.fmt.allocPrint(allocator, "{d}", .{value});
+    defer allocator.free(raw);
+
+    if (raw.len <= 3) return allocator.dupe(u8, raw);
+
+    const separator_count = (raw.len - 1) / 3;
+    const out_len = raw.len + separator_count;
+    var out = try allocator.alloc(u8, out_len);
+
+    var src_index: isize = @intCast(raw.len);
+    var dst_index: isize = @intCast(out_len);
+    var digit_group: u8 = 0;
+
+    while (src_index > 0) {
+        src_index -= 1;
+        dst_index -= 1;
+        out[@intCast(dst_index)] = raw[@intCast(src_index)];
+        digit_group += 1;
+        if (digit_group == 3 and src_index > 0) {
+            dst_index -= 1;
+            out[@intCast(dst_index)] = ',';
+            digit_group = 0;
+        }
+    }
+
+    return out;
+}
+
+fn computeContextLeftPercent(total_tokens: u64, context_window_tokens: u64) u64 {
+    if (context_window_tokens == 0) return 0;
+    if (total_tokens >= context_window_tokens) return 0;
+    const remaining = context_window_tokens - total_tokens;
+    return @divFloor(remaining * 100, context_window_tokens);
+}
+
+fn resolveModelContextWindowFromZolt(
+    allocator: Allocator,
+    zolt_cmd: []const u8,
+    provider: []const u8,
+    model: []const u8,
+) !?u64 {
+    const provider_trimmed = std.mem.trim(u8, provider, " \t\r\n");
+    const model_trimmed = std.mem.trim(u8, model, " \t\r\n");
+    if (provider_trimmed.len == 0 or model_trimmed.len == 0) return null;
+    if (std.mem.eql(u8, provider_trimmed, "unknown") or std.mem.eql(u8, model_trimmed, "unknown")) return null;
+
+    const argv = [_][]const u8{
+        zolt_cmd,
+        "models",
+        "--provider",
+        provider_trimmed,
+        "--search",
+        model_trimmed,
+    };
+    const result = std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &argv,
+    }) catch return null;
+    defer {
+        allocator.free(result.stdout);
+        allocator.free(result.stderr);
+    }
+
+    switch (result.term) {
+        .Exited => |code| if (code != 0) return null,
+        else => return null,
+    }
+    return parseContextWindowFromModelsOutput(result.stdout);
+}
+
+fn parseContextWindowFromModelsOutput(output: []const u8) ?u64 {
+    const marker = "(ctx:";
+    const start = std.mem.indexOf(u8, output, marker) orelse return null;
+    var index = start + marker.len;
+    while (index < output.len and std.ascii.isWhitespace(output[index])) : (index += 1) {}
+    var end = index;
+    while (end < output.len and output[end] >= '0' and output[end] <= '9') : (end += 1) {}
+    if (end == index) return null;
+    return std.fmt.parseInt(u64, output[index..end], 10) catch null;
 }
 
 fn renderTelegramSlashCommands(allocator: Allocator) ![]u8 {
@@ -3110,6 +3258,19 @@ fn parseZoltRunJson(allocator: Allocator, text: []const u8) !ZoltRunOutput {
         resolveJsonUnsignedField(root, &.{"output_tokens"});
     const total_tokens = resolveJsonUnsignedField(root, &.{ "usage", "total_tokens" }) orelse
         resolveJsonUnsignedField(root, &.{"total_tokens"});
+    const context_window_tokens = resolveJsonUnsignedField(root, &.{ "usage", "context_window_tokens" }) orelse
+        resolveJsonUnsignedField(root, &.{ "usage", "context_window" }) orelse
+        resolveJsonUnsignedField(root, &.{"context_window_tokens"}) orelse
+        resolveJsonUnsignedField(root, &.{"context_window"}) orelse
+        resolveJsonUnsignedField(root, &.{"model_context_window"});
+    const context_left_percent = resolveJsonUnsignedField(root, &.{ "usage", "context_left_percent" }) orelse
+        resolveJsonUnsignedField(root, &.{"context_left_percent"}) orelse
+        resolveJsonUnsignedField(root, &.{"percent_left"});
+    const compact_count = resolveJsonUnsignedField(root, &.{ "usage", "compact_count" }) orelse
+        resolveJsonUnsignedField(root, &.{ "usage", "compaction_count" }) orelse
+        resolveJsonUnsignedField(root, &.{"compact_count"}) orelse
+        resolveJsonUnsignedField(root, &.{"compaction_count"}) orelse
+        resolveJsonUnsignedField(root, &.{ "session", "compaction_count" });
     const final_response = try extractZoltRunFinalResponse(allocator, root);
 
     return ZoltRunOutput{
@@ -3121,6 +3282,9 @@ fn parseZoltRunJson(allocator: Allocator, text: []const u8) !ZoltRunOutput {
         .prompt_tokens = prompt_tokens,
         .completion_tokens = completion_tokens,
         .total_tokens = total_tokens,
+        .context_window_tokens = context_window_tokens,
+        .context_left_percent = context_left_percent,
+        .compact_count = compact_count,
     };
 }
 
@@ -4224,6 +4388,9 @@ fn loadTelegramZoltRunMetadata(
                 .prompt_tokens = entry.prompt_tokens,
                 .completion_tokens = entry.completion_tokens,
                 .total_tokens = entry.total_tokens,
+                .context_window_tokens = entry.context_window_tokens,
+                .context_left_percent = entry.context_left_percent,
+                .compact_count = entry.compact_count,
                 .updated_at_ms = entry.updated_at_ms,
             };
         }
@@ -4446,17 +4613,34 @@ fn persistTelegramZoltRunMetadata(
     const normalized_provider = if (output.provider.len > 0) output.provider else "";
     const normalized_model = if (output.model.len > 0) output.model else "";
     const updated_at_ms = std.time.milliTimestamp();
+    const output_context_window = output.context_window_tokens;
+    const output_context_left = output.context_left_percent;
+    const output_compact_count = output.compact_count;
 
     var found = false;
     for (parsed.value.entries) |entry| {
         if (std.mem.eql(u8, entry.key, key)) {
+            const merged_provider = if (normalized_provider.len > 0) normalized_provider else entry.provider;
+            const merged_model = if (normalized_model.len > 0) normalized_model else entry.model;
+            const merged_context_window = output_context_window orelse entry.context_window_tokens;
+            const merged_total_tokens = output.total_tokens orelse entry.total_tokens;
+            const merged_context_left = if (output_context_left) |value|
+                value
+            else if (merged_context_window != null and merged_total_tokens != null)
+                computeContextLeftPercent(merged_total_tokens.?, merged_context_window.?)
+            else
+                entry.context_left_percent;
+            const merged_compact_count = output_compact_count orelse entry.compact_count;
             try entries.append(allocator, .{
                 .key = key,
-                .provider = normalized_provider,
-                .model = normalized_model,
+                .provider = merged_provider,
+                .model = merged_model,
                 .prompt_tokens = output.prompt_tokens,
                 .completion_tokens = output.completion_tokens,
-                .total_tokens = output.total_tokens,
+                .total_tokens = merged_total_tokens,
+                .context_window_tokens = merged_context_window,
+                .context_left_percent = merged_context_left,
+                .compact_count = merged_compact_count,
                 .updated_at_ms = updated_at_ms,
             });
             found = true;
@@ -4466,6 +4650,12 @@ fn persistTelegramZoltRunMetadata(
     }
 
     if (!found) {
+        const inferred_context_left = if (output_context_left) |value|
+            value
+        else if (output_context_window != null and output.total_tokens != null)
+            computeContextLeftPercent(output.total_tokens.?, output_context_window.?)
+        else
+            null;
         try entries.append(allocator, .{
             .key = key,
             .provider = normalized_provider,
@@ -4473,6 +4663,9 @@ fn persistTelegramZoltRunMetadata(
             .prompt_tokens = output.prompt_tokens,
             .completion_tokens = output.completion_tokens,
             .total_tokens = output.total_tokens,
+            .context_window_tokens = output_context_window,
+            .context_left_percent = inferred_context_left,
+            .compact_count = output_compact_count,
             .updated_at_ms = updated_at_ms,
         });
     }
@@ -5152,6 +5345,18 @@ test "executeTelegramSlashCommand status includes provider model and token usage
     try testing.expect(std.mem.indexOf(u8, status, "last-token-usage: prompt=123 completion=456 total=579") != null);
 }
 
+test "formatUnsignedWithCommas inserts separators" {
+    const allocator = testing.allocator;
+
+    const small = try formatUnsignedWithCommas(allocator, 999);
+    defer allocator.free(small);
+    try testing.expectEqualStrings("999", small);
+
+    const large = try formatUnsignedWithCommas(allocator, 1234567890);
+    defer allocator.free(large);
+    try testing.expectEqualStrings("1,234,567,890", large);
+}
+
 test "clearTelegramZoltSessionId updates persisted sessions" {
     const allocator = testing.allocator;
     const root = try std.fmt.allocPrint(allocator, "/tmp/volt-clear-session-test-{d}", .{std.time.milliTimestamp()});
@@ -5237,6 +5442,19 @@ test "parseZoltRunJson reads usage tokens when present" {
     try testing.expectEqual(@as(?u64, 11), parsed.prompt_tokens);
     try testing.expectEqual(@as(?u64, 22), parsed.completion_tokens);
     try testing.expectEqual(@as(?u64, 33), parsed.total_tokens);
+}
+
+test "parseZoltRunJson reads context and compaction usage when present" {
+    const allocator = testing.allocator;
+    const payload =
+        "{\"session_id\":\"abc\",\"response\":\"hello\",\"usage\":{\"context_window_tokens\":400000,\"context_left_percent\":92,\"compact_count\":3}}";
+
+    const parsed = try parseZoltRunJson(allocator, payload);
+    defer deinitZoltRunOutput(allocator, parsed);
+
+    try testing.expectEqual(@as(?u64, 400000), parsed.context_window_tokens);
+    try testing.expectEqual(@as(?u64, 92), parsed.context_left_percent);
+    try testing.expectEqual(@as(?u64, 3), parsed.compact_count);
 }
 
 test "parseZoltRunJson prefers final token event text" {

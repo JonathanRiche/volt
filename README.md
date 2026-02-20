@@ -66,7 +66,7 @@ In Telegram, send:
 - `/help` to view the menu summary
 - `/commands` for the full command list
 - `/sessions` to show the mapped zolt session for this chat
-- `/status` to show runtime details, including last provider/model and token usage when available from zolt JSON output
+- `/status` to show runtime details, including last provider/model, token usage, context-left estimate, and compaction count when available from zolt JSON output
 - `/reset` to clear the mapped zolt session
 - `/models` to run the zolt model command (requires `--zolt`)
 
