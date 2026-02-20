@@ -2062,41 +2062,12 @@ fn executeDispatchCommand(allocator: Allocator, argv: []const []const u8, ctx: T
         allocator.free(result.stderr);
     }
 
-    var out = std.Io.Writer.Allocating.init(allocator);
-    defer out.deinit();
-
-    try out.writer.writeAll(result.stdout);
-
-    if (result.stderr.len > 0) {
-        if (result.stdout.len > 0) try out.writer.writeAll("\n");
-        try out.writer.writeAll("[stderr]\n");
-        try out.writer.writeAll(result.stderr);
-    }
-
-    switch (result.term) {
-        .Exited => |code| {
-            if (code != 0) {
-                const code_text = try std.fmt.allocPrint(allocator, "[exit={d}]", .{code});
-                defer allocator.free(code_text);
-                if (result.stdout.len > 0 or result.stderr.len > 0) try out.writer.writeAll("\n");
-                try out.writer.writeAll(code_text);
-            }
-        },
-        .Signal => {
-            if (result.stdout.len > 0 or result.stderr.len > 0) try out.writer.writeAll("\n");
-            try out.writer.writeAll("[signal]\n");
-        },
-        .Stopped => {
-            if (result.stdout.len > 0 or result.stderr.len > 0) try out.writer.writeAll("\n");
-            try out.writer.writeAll("[stopped]\n");
-        },
-        .Unknown => {
-            if (result.stdout.len > 0 or result.stderr.len > 0) try out.writer.writeAll("\n");
-            try out.writer.writeAll("[unknown]\n");
-        },
-    }
-
-    return out.toOwnedSlice();
+    return try composeChildOutput(
+        allocator,
+        result.stdout,
+        result.stderr,
+        result.term,
+    );
 }
 
 const DispatchValidationError = error{
@@ -2222,41 +2193,73 @@ fn executeShellCommand(allocator: Allocator, command: []const u8) ![]u8 {
         allocator.free(result.stderr);
     }
 
-    var out = std.Io.Writer.Allocating.init(allocator);
-    defer out.deinit();
+    return try composeChildOutput(
+        allocator,
+        result.stdout,
+        result.stderr,
+        result.term,
+    );
+}
 
-    try out.writer.writeAll(result.stdout);
-
-    if (result.stderr.len > 0) {
-        if (result.stdout.len > 0) try out.writer.writeAll("\n");
-        try out.writer.writeAll("[stderr]\n");
-        try out.writer.writeAll(result.stderr);
-    }
-
-    switch (result.term) {
+fn composeChildOutput(
+    allocator: Allocator,
+    stdout: []const u8,
+    stderr: []const u8,
+    term: std.process.Child.Term,
+) ![]u8 {
+    var footer_text: ?[]const u8 = null;
+    var exit_buf: [16]u8 = undefined;
+    switch (term) {
         .Exited => |code| {
             if (code != 0) {
-                const code_text = try std.fmt.allocPrint(allocator, "[exit={d}]", .{code});
-                defer allocator.free(code_text);
-                if (result.stdout.len > 0 or result.stderr.len > 0) try out.writer.writeAll("\n");
-                try out.writer.writeAll(code_text);
+                footer_text = std.fmt.bufPrint(&exit_buf, "[exit={d}]", .{code}) catch unreachable;
             }
         },
-        .Signal => {
-            if (result.stdout.len > 0 or result.stderr.len > 0) try out.writer.writeAll("\n");
-            try out.writer.writeAll("[signal]\n");
-        },
-        .Stopped => {
-            if (result.stdout.len > 0 or result.stderr.len > 0) try out.writer.writeAll("\n");
-            try out.writer.writeAll("[stopped]\n");
-        },
-        .Unknown => {
-            if (result.stdout.len > 0 or result.stderr.len > 0) try out.writer.writeAll("\n");
-            try out.writer.writeAll("[unknown]\n");
-        },
+        .Signal => footer_text = "[signal]\n",
+        .Stopped => footer_text = "[stopped]\n",
+        .Unknown => footer_text = "[unknown]\n",
     }
 
-    return out.toOwnedSlice();
+    const has_body = stdout.len > 0 or stderr.len > 0;
+    var total_len = stdout.len;
+    if (stderr.len > 0) {
+        if (stdout.len > 0) total_len += 1;
+        total_len += "[stderr]\n".len;
+        total_len += stderr.len;
+    }
+    if (footer_text) |text| {
+        if (has_body) total_len += 1;
+        total_len += text.len;
+    }
+
+    var out = try allocator.alloc(u8, total_len);
+    var cursor: usize = 0;
+    if (stdout.len > 0) {
+        std.mem.copyForwards(u8, out[cursor .. cursor + stdout.len], stdout);
+        cursor += stdout.len;
+    }
+
+    if (stderr.len > 0) {
+        if (stdout.len > 0) {
+            out[cursor] = '\n';
+            cursor += 1;
+        }
+        std.mem.copyForwards(u8, out[cursor .. cursor + "[stderr]\n".len], "[stderr]\n");
+        cursor += "[stderr]\n".len;
+        std.mem.copyForwards(u8, out[cursor .. cursor + stderr.len], stderr);
+        cursor += stderr.len;
+    }
+
+    if (footer_text) |text| {
+        if (has_body) {
+            out[cursor] = '\n';
+            cursor += 1;
+        }
+        std.mem.copyForwards(u8, out[cursor .. cursor + text.len], text);
+        cursor += text.len;
+    }
+
+    return out;
 }
 
 fn fetchUpdates(
@@ -2910,6 +2913,26 @@ test "dispatch rendering replaces session placeholders" {
     try testing.expectEqualStrings("--account", rendered[5]);
     try testing.expectEqualStrings("work", rendered[6]);
     try testing.expectEqualStrings("status update", rendered[7]);
+}
+
+test "composeChildOutput combines stdout and stderr with suffix markers" {
+    const allocator = testing.allocator;
+
+    const plain = try composeChildOutput(allocator, "answer", "", .{ .Exited = 0 });
+    defer allocator.free(plain);
+    try testing.expectEqualStrings("answer", plain);
+
+    const stderr_only = try composeChildOutput(allocator, "", "warn\n", .{ .Exited = 0 });
+    defer allocator.free(stderr_only);
+    try testing.expectEqualStrings("[stderr]\nwarn\n", stderr_only);
+
+    const both = try composeChildOutput(allocator, "answer", "warn\n", .{ .Exited = 0 });
+    defer allocator.free(both);
+    try testing.expectEqualStrings("answer\n[stderr]\nwarn\n", both);
+
+    const with_exit = try composeChildOutput(allocator, "answer", "warn\n", .{ .Exited = 2 });
+    defer allocator.free(with_exit);
+    try testing.expectEqualStrings("answer\n[stderr]\nwarn\n\n[exit=2]", with_exit);
 }
 
 test "parseInitOptions parses mirror-volt and source/home paths" {
