@@ -192,6 +192,16 @@ const TelegramUpdates = struct {
     result: []const TelegramUpdate = &.{},
 };
 
+const TelegramUpdatesEnvelope = struct {
+    payload: []u8,
+    parsed: std.json.Parsed(TelegramUpdates),
+
+    fn deinit(self: TelegramUpdatesEnvelope, allocator: Allocator) void {
+        self.parsed.deinit();
+        allocator.free(self.payload);
+    }
+};
+
 const DefaultAllowFromJson = "{\"version\":1,\"allowFrom\":[]}";
 const DefaultOffsetJson = "{\"version\":1,\"lastUpdateId\":0}";
 const DefaultPairingJson = "{\"version\":1,\"requests\":[]}";
@@ -950,10 +960,10 @@ fn runTelegramGateway(allocator: Allocator, opts: TelegramRunOptions) !void {
             std.Thread.sleep(clampPollInterval(opts.poll_ms) * std.time.ns_per_ms);
             continue;
         };
-        defer updates.deinit();
+        defer updates.deinit(allocator);
 
         var next_offset = current_offset;
-        for (updates.value.result) |update| {
+        for (updates.parsed.value.result) |update| {
             if (update.message) |message| {
                 const chat = message.chat orelse continue;
                 const text = message.text orelse continue;
@@ -2264,7 +2274,7 @@ fn fetchUpdates(
     token: []const u8,
     offset: i64,
     poll_ms: u64,
-) !std.json.Parsed(TelegramUpdates) {
+) !TelegramUpdatesEnvelope {
     var url_buf: [1536]u8 = undefined;
     const url = try std.fmt.bufPrint(
         &url_buf,
@@ -2283,7 +2293,18 @@ fn fetchUpdates(
         return error.TelegramRequestFailed;
     }
 
-    return std.json.parseFromSlice(TelegramUpdates, allocator, response.written(), .{ .ignore_unknown_fields = true });
+    const payload = try response.toOwnedSlice();
+    const parsed = try std.json.parseFromSlice(
+        TelegramUpdates,
+        allocator,
+        payload,
+        .{ .ignore_unknown_fields = true },
+    );
+
+    return TelegramUpdatesEnvelope{
+        .payload = payload,
+        .parsed = parsed,
+    };
 }
 
 fn sendTelegramMessage(allocator: Allocator, client: *std.http.Client, token: []const u8, chat_id: i64, text: []const u8) !void {
