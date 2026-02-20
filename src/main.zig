@@ -111,6 +111,11 @@ const TelegramSetupOptions = struct {
     allow_from: std.ArrayListUnmanaged([]const u8),
 };
 
+const TelegramListOptions = struct {
+    home_path: ?[]const u8,
+    account: ?[]const u8,
+};
+
 const TelegramRunOptions = struct {
     home_path: ?[]const u8,
     token: ?[]const u8,
@@ -450,6 +455,7 @@ fn printUsage() !void {
         "Usage:\n" ++
         "  volt init [--mirror-volt] [--source <path>] [--home <path>] [--force]\n" ++
         "  volt telegram setup --token <token> [--account <id>] [--allow-from <chat_id>]... [--home <path>] [--force]\n" ++
+        "  volt telegram list [--home <path>] [--account <id>]\n" ++
         "  volt telegram install|start|stop|restart|status|uninstall [--token <token>] [--account <id>] [--home <path>] [--dispatch <command>] [--zolt] [--zolt-path <path>] [--zolt-output <text|json|logs|json-stream>] [--poll-ms <ms>]\n" ++
         "  volt --telegram [--token <token>] [--account <id>] [--home <path>] [--dispatch <command>] [--zolt] [--zolt-path <path>] [--zolt-output <text|json|logs|json-stream>] [--poll-ms <ms>]\n" ++
         "  volt gateway [--home <path>] [--bind <ip>] [--port <port>] [--account <id>] [--dispatch <command>] [--zolt] [--zolt-path <path>] [--zolt-output <text|json|logs|json-stream>] [--auth-token <token>]\n" ++
@@ -502,6 +508,12 @@ pub fn main() !void {
             var opts = try parseTelegramSetupOptions(allocator, args[3..]);
             defer opts.allow_from.deinit(allocator);
             try runTelegramSetup(allocator, opts);
+            return;
+        }
+
+        if (args.len >= 3 and std.mem.eql(u8, args[2], "list")) {
+            const opts = try parseTelegramListOptions(args[3..]);
+            try runTelegramList(allocator, opts);
             return;
         }
 
@@ -2128,6 +2140,33 @@ fn parseTelegramSetupOptions(allocator: Allocator, args: []const []const u8) !Te
     return result;
 }
 
+fn parseTelegramListOptions(args: []const []const u8) !TelegramListOptions {
+    var result = TelegramListOptions{
+        .home_path = null,
+        .account = null,
+    };
+
+    var idx: usize = 0;
+    while (idx < args.len) : (idx += 1) {
+        const arg = args[idx];
+        if (std.mem.eql(u8, arg, "--home")) {
+            if (idx + 1 >= args.len) return error.UnexpectedArgument;
+            result.home_path = args[idx + 1];
+            idx += 1;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--account")) {
+            if (idx + 1 >= args.len) return error.UnexpectedArgument;
+            result.account = args[idx + 1];
+            idx += 1;
+            continue;
+        }
+        return error.UnknownArgument;
+    }
+
+    return result;
+}
+
 fn parseTelegramRunOptions(args: []const []const u8) !TelegramRunOptions {
     var result = TelegramRunOptions{
         .home_path = null,
@@ -2311,6 +2350,374 @@ fn parseGatewayServiceAction(arg: []const u8) GatewayServiceAction {
     return .run;
 }
 
+fn runTelegramList(allocator: Allocator, opts: TelegramListOptions) !void {
+    const root = try resolveHomePath(allocator, opts.home_path);
+    defer allocator.free(root);
+
+    var accounts = std.ArrayListUnmanaged([]u8){};
+    defer {
+        for (accounts.items) |account| allocator.free(account);
+        accounts.deinit(allocator);
+    }
+
+    if (opts.account) |raw_account| {
+        try appendUniqueNormalizedAccount(allocator, &accounts, raw_account);
+    } else {
+        try appendUniqueNormalizedAccount(allocator, &accounts, DefaultAccountId);
+        const config_path = try joinPath(allocator, root, "volt.json");
+        defer allocator.free(config_path);
+        const config_data = readFileAlloc(allocator, config_path) catch null;
+        defer if (config_data) |data| allocator.free(data);
+        if (config_data) |data| {
+            try appendTelegramAccountsFromConfig(allocator, data, &accounts);
+        }
+        try appendTelegramAccountsFromSessionMap(allocator, root, &accounts);
+    }
+
+    if (accounts.items.len == 0) {
+        try appendUniqueNormalizedAccount(allocator, &accounts, DefaultAccountId);
+    }
+
+    const service_status = try resolveTelegramServiceStatus(allocator);
+    defer allocator.free(service_status);
+    const service_account = try resolveTelegramServiceAccount(allocator);
+    defer if (service_account) |value| allocator.free(value);
+
+    const config_path = try joinPath(allocator, root, "volt.json");
+    defer allocator.free(config_path);
+    const config_data = readFileAlloc(allocator, config_path) catch null;
+    defer if (config_data) |data| allocator.free(data);
+
+    var out = std.ArrayListUnmanaged(u8){};
+    defer out.deinit(allocator);
+    try out.appendSlice(allocator, "Volt telegram list\n");
+    switch (builtin.os.tag) {
+        .linux => {
+            try out.appendSlice(allocator, "platform: linux\n");
+            try out.appendSlice(allocator, "service: ");
+            try out.appendSlice(allocator, TelegramSystemdUnit);
+            try out.appendSlice(allocator, "\n");
+        },
+        .macos => {
+            try out.appendSlice(allocator, "platform: macos\n");
+            try out.appendSlice(allocator, "service: ");
+            try out.appendSlice(allocator, TelegramLaunchdLabel);
+            try out.appendSlice(allocator, "\n");
+        },
+        else => {
+            try out.appendSlice(allocator, "platform: unsupported\nservice: n/a\n");
+        },
+    }
+    try out.appendSlice(allocator, "service-status: ");
+    try out.appendSlice(allocator, service_status);
+    try out.appendSlice(allocator, "\n");
+    try out.appendSlice(allocator, "service-account: ");
+    if (service_account) |value| {
+        try out.appendSlice(allocator, value);
+    } else {
+        try out.appendSlice(allocator, "unknown");
+    }
+    try out.appendSlice(allocator, "\naccounts:\n");
+
+    for (accounts.items) |account| {
+        const token_configured = try hasTelegramTokenForAccount(allocator, config_data, account);
+        const mapped_chats = try countMappedChatsForAccount(allocator, root, account);
+        const mapped_text = try formatUnsignedWithCommas(allocator, mapped_chats);
+        defer allocator.free(mapped_text);
+
+        try out.appendSlice(allocator, "- ");
+        try out.appendSlice(allocator, account);
+        if (service_account) |current| {
+            if (std.mem.eql(u8, current, account)) {
+                try out.appendSlice(allocator, " [service]");
+            }
+        }
+        try out.appendSlice(allocator, " token=");
+        try out.appendSlice(allocator, if (token_configured) "configured" else "missing");
+        try out.appendSlice(allocator, " mapped-chats=");
+        try out.appendSlice(allocator, mapped_text);
+        try out.appendSlice(allocator, "\n");
+    }
+
+    try std.fs.File.stderr().deprecatedWriter().print("{s}", .{out.items});
+}
+
+fn appendUniqueNormalizedAccount(
+    allocator: Allocator,
+    out: *std.ArrayListUnmanaged([]u8),
+    raw: []const u8,
+) !void {
+    const normalized = try normalizeAccountId(allocator, raw);
+    if (normalized.len == 0) {
+        allocator.free(normalized);
+        return;
+    }
+    for (out.items) |entry| {
+        if (std.mem.eql(u8, entry, normalized)) {
+            allocator.free(normalized);
+            return;
+        }
+    }
+    try out.append(allocator, normalized);
+}
+
+fn appendTelegramAccountsFromConfig(
+    allocator: Allocator,
+    config_data: []const u8,
+    out: *std.ArrayListUnmanaged([]u8),
+) !void {
+    const parsed = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        config_data,
+        .{ .ignore_unknown_fields = true },
+    );
+    defer parsed.deinit();
+
+    const root = &parsed.value;
+    const default_token = resolveJsonStringField(root, &.{ "channels", "telegram", "botToken" });
+    const default_token_file = resolveJsonStringField(root, &.{ "channels", "telegram", "tokenFile" });
+    if ((default_token != null and std.mem.trim(u8, default_token.?, " \t\r\n").len > 0) or
+        (default_token_file != null and std.mem.trim(u8, default_token_file.?, " \t\r\n").len > 0))
+    {
+        try appendUniqueNormalizedAccount(allocator, out, DefaultAccountId);
+    }
+
+    const accounts_value = resolveJsonValue(root, &.{ "channels", "telegram", "accounts" }) orelse return;
+    if (accounts_value.* != .object) return;
+
+    var it = accounts_value.object.iterator();
+    while (it.next()) |entry| {
+        try appendUniqueNormalizedAccount(allocator, out, entry.key_ptr.*);
+    }
+}
+
+fn appendTelegramAccountsFromSessionMap(
+    allocator: Allocator,
+    root: []const u8,
+    out: *std.ArrayListUnmanaged([]u8),
+) !void {
+    const path = try resolveTelegramZoltSessionPath(allocator, root);
+    defer allocator.free(path);
+
+    const data = readFileAlloc(allocator, path) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return,
+    };
+    defer allocator.free(data);
+
+    const parsed = std.json.parseFromSlice(
+        TelegramZoltSessionMap,
+        allocator,
+        data,
+        .{ .ignore_unknown_fields = true },
+    ) catch return;
+    defer parsed.deinit();
+
+    for (parsed.value.sessions) |entry| {
+        if (!std.mem.startsWith(u8, entry.key, "telegram:")) continue;
+        const rest = entry.key["telegram:".len..];
+        const sep = std.mem.indexOfScalar(u8, rest, ':') orelse continue;
+        const account = rest[0..sep];
+        if (account.len == 0) continue;
+        try appendUniqueNormalizedAccount(allocator, out, account);
+    }
+}
+
+fn hasTelegramTokenForAccount(
+    allocator: Allocator,
+    config_data: ?[]const u8,
+    account: []const u8,
+) !bool {
+    if (config_data) |data| {
+        const token = resolveTelegramTokenFromConfig(allocator, data, account) catch return false;
+        defer allocator.free(token);
+        return std.mem.trim(u8, token, " \t\r\n").len > 0;
+    }
+
+    if (std.mem.eql(u8, account, DefaultAccountId)) {
+        const env_token = std.process.getEnvVarOwned(allocator, "TELEGRAM_BOT_TOKEN") catch |err| {
+            return switch (err) {
+                error.EnvironmentVariableNotFound => false,
+                else => false,
+            };
+        };
+        defer allocator.free(env_token);
+        return std.mem.trim(u8, env_token, " \t\r\n").len > 0;
+    }
+
+    return false;
+}
+
+fn countMappedChatsForAccount(
+    allocator: Allocator,
+    root: []const u8,
+    account: []const u8,
+) !u64 {
+    const path = try resolveTelegramZoltSessionPath(allocator, root);
+    defer allocator.free(path);
+
+    const data = readFileAlloc(allocator, path) catch |err| switch (err) {
+        error.FileNotFound => return 0,
+        else => return 0,
+    };
+    defer allocator.free(data);
+
+    const parsed = std.json.parseFromSlice(
+        TelegramZoltSessionMap,
+        allocator,
+        data,
+        .{ .ignore_unknown_fields = true },
+    ) catch return 0;
+    defer parsed.deinit();
+
+    const prefix = try std.fmt.allocPrint(allocator, "telegram:{s}:", .{account});
+    defer allocator.free(prefix);
+
+    var total: u64 = 0;
+    for (parsed.value.sessions) |entry| {
+        if (std.mem.startsWith(u8, entry.key, prefix)) {
+            total += 1;
+        }
+    }
+    return total;
+}
+
+fn resolveTelegramServiceStatus(allocator: Allocator) ![]u8 {
+    return switch (builtin.os.tag) {
+        .linux => resolveLinuxUserServiceStatus(allocator, TelegramSystemdUnit),
+        .macos => resolveLaunchdServiceStatus(allocator, TelegramLaunchdLabel),
+        else => allocator.dupe(u8, "unsupported"),
+    };
+}
+
+fn resolveLinuxUserServiceStatus(allocator: Allocator, service_unit: []const u8) ![]u8 {
+    const cmd = try std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &.{ "systemctl", "--user", "is-active", service_unit },
+    });
+    defer {
+        allocator.free(cmd.stdout);
+        allocator.free(cmd.stderr);
+    }
+
+    const stdout_trimmed = std.mem.trim(u8, cmd.stdout, " \t\r\n");
+    if (stdout_trimmed.len > 0) {
+        return try allocator.dupe(u8, stdout_trimmed);
+    }
+
+    if (std.mem.indexOf(u8, cmd.stderr, "could not be found") != null) {
+        return try allocator.dupe(u8, "not-installed");
+    }
+    return try allocator.dupe(u8, "unknown");
+}
+
+fn resolveLaunchdServiceStatus(allocator: Allocator, service_label: []const u8) ![]u8 {
+    const gui_scope = try getLaunchdGuiScope(allocator);
+    defer allocator.free(gui_scope);
+
+    const launchd_service = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ gui_scope, service_label });
+    defer allocator.free(launchd_service);
+
+    const cmd = try std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &.{ "launchctl", "print", launchd_service },
+    });
+    defer {
+        allocator.free(cmd.stdout);
+        allocator.free(cmd.stderr);
+    }
+
+    if (cmd.term == .Exited and cmd.term.Exited == 0) {
+        return try allocator.dupe(u8, "loaded");
+    }
+    if (std.mem.indexOf(u8, cmd.stderr, "Could not find service") != null or
+        std.mem.indexOf(u8, cmd.stderr, "could not find service") != null)
+    {
+        return try allocator.dupe(u8, "not-loaded");
+    }
+    return try allocator.dupe(u8, "unknown");
+}
+
+fn resolveTelegramServiceAccount(allocator: Allocator) !?[]u8 {
+    return switch (builtin.os.tag) {
+        .linux => resolveTelegramServiceAccountLinux(allocator),
+        .macos => resolveTelegramServiceAccountMacos(allocator),
+        else => null,
+    };
+}
+
+fn resolveTelegramServiceAccountLinux(allocator: Allocator) !?[]u8 {
+    const unit_path = try resolveTelegramSystemdServicePathReadOnly(allocator);
+    defer allocator.free(unit_path);
+
+    const unit = readFileAlloc(allocator, unit_path) catch |err| switch (err) {
+        error.FileNotFound => return null,
+        else => return null,
+    };
+    defer allocator.free(unit);
+
+    return extractTelegramAccountFromSystemdUnit(allocator, unit);
+}
+
+fn resolveTelegramServiceAccountMacos(allocator: Allocator) !?[]u8 {
+    const plist_path = try resolveTelegramLaunchdPlistPathReadOnly(allocator);
+    defer allocator.free(plist_path);
+
+    const plist = readFileAlloc(allocator, plist_path) catch |err| switch (err) {
+        error.FileNotFound => return null,
+        else => return null,
+    };
+    defer allocator.free(plist);
+
+    return extractTelegramAccountFromLaunchdPlist(allocator, plist);
+}
+
+fn resolveTelegramSystemdServicePathReadOnly(allocator: Allocator) ![]u8 {
+    const config_root = resolveGatewayXdgConfigRoot(allocator) catch return error.GatewayServiceUnsupportedPlatform;
+    defer allocator.free(config_root);
+    const systemd_path = try joinPath(allocator, config_root, "systemd");
+    defer allocator.free(systemd_path);
+    const user_path = try joinPath(allocator, systemd_path, "user");
+    defer allocator.free(user_path);
+    return try joinPath(allocator, user_path, TelegramSystemdUnit);
+}
+
+fn resolveTelegramLaunchdPlistPathReadOnly(allocator: Allocator) ![]u8 {
+    const home = try resolveVoltHome(allocator);
+    defer allocator.free(home);
+    const support = try joinPath(allocator, home, "Library/LaunchAgents");
+    defer allocator.free(support);
+    return try std.fmt.allocPrint(allocator, "{s}/{s}.plist", .{ support, TelegramLaunchdLabel });
+}
+
+fn extractTelegramAccountFromSystemdUnit(allocator: Allocator, unit: []const u8) !?[]u8 {
+    const marker = "'--account' '";
+    const start = std.mem.indexOf(u8, unit, marker) orelse return null;
+    const value_start = start + marker.len;
+    if (value_start >= unit.len) return null;
+    const rest = unit[value_start..];
+    const end = std.mem.indexOfScalar(u8, rest, '\'') orelse return null;
+    if (end == 0) return null;
+    const candidate = rest[0..end];
+    return try allocator.dupe(u8, candidate);
+}
+
+fn extractTelegramAccountFromLaunchdPlist(allocator: Allocator, plist: []const u8) !?[]u8 {
+    const marker = "<string>--account</string>";
+    const marker_pos = std.mem.indexOf(u8, plist, marker) orelse return null;
+    const after_marker = plist[marker_pos + marker.len ..];
+    const open_tag = "<string>";
+    const close_tag = "</string>";
+    const open_pos = std.mem.indexOf(u8, after_marker, open_tag) orelse return null;
+    const value_start = open_pos + open_tag.len;
+    if (value_start >= after_marker.len) return null;
+    const value_slice = after_marker[value_start..];
+    const close_pos = std.mem.indexOf(u8, value_slice, close_tag) orelse return null;
+    if (close_pos == 0) return null;
+    return try allocator.dupe(u8, value_slice[0..close_pos]);
+}
+
 fn runTelegramServiceAction(
     allocator: Allocator,
     action: GatewayServiceAction,
@@ -2366,7 +2773,6 @@ fn runTelegramServiceLinux(allocator: Allocator, action: GatewayServiceAction, o
         .status => {
             var status = std.ArrayListUnmanaged(u8){};
             defer status.deinit(allocator);
-            try status.appendSlice(allocator, "unknown");
 
             try runGatewayCommandWithOutput(
                 allocator,
@@ -2376,6 +2782,9 @@ fn runTelegramServiceLinux(allocator: Allocator, action: GatewayServiceAction, o
                 true,
             );
 
+            if (status.items.len == 0) {
+                try status.appendSlice(allocator, "unknown");
+            }
             std.fs.File.stderr().deprecatedWriter().print("volt: telegram service status: {s}\n", .{status.items}) catch {};
         },
         .run => return,
@@ -2492,7 +2901,6 @@ fn runGatewayServiceLinux(allocator: Allocator, action: GatewayServiceAction, op
         .status => {
             var status = std.ArrayListUnmanaged(u8){};
             defer status.deinit(allocator);
-            try status.appendSlice(allocator, "unknown");
 
             try runGatewayCommandWithOutput(
                 allocator,
@@ -2502,6 +2910,9 @@ fn runGatewayServiceLinux(allocator: Allocator, action: GatewayServiceAction, op
                 true,
             );
 
+            if (status.items.len == 0) {
+                try status.appendSlice(allocator, "unknown");
+            }
             std.fs.File.stderr().deprecatedWriter().print("volt: gateway service status: {s}\n", .{status.items}) catch {};
         },
         .run => return,
@@ -2627,6 +3038,7 @@ fn getLaunchdGuiScope(allocator: Allocator) ![]u8 {
 
 fn resolveGatewaySystemdServicePath(allocator: Allocator) ![]u8 {
     const config_root = resolveGatewayXdgConfigRoot(allocator) catch return error.GatewayServiceUnsupportedPlatform;
+    defer allocator.free(config_root);
     const systemd_path = try joinPath(allocator, config_root, "systemd");
     defer allocator.free(systemd_path);
     const user_path = try joinPath(allocator, systemd_path, "user");
@@ -2637,6 +3049,7 @@ fn resolveGatewaySystemdServicePath(allocator: Allocator) ![]u8 {
 
 fn resolveTelegramSystemdServicePath(allocator: Allocator) ![]u8 {
     const config_root = resolveGatewayXdgConfigRoot(allocator) catch return error.GatewayServiceUnsupportedPlatform;
+    defer allocator.free(config_root);
     const systemd_path = try joinPath(allocator, config_root, "systemd");
     defer allocator.free(systemd_path);
     const user_path = try joinPath(allocator, systemd_path, "user");
@@ -5511,6 +5924,14 @@ test "parseTelegramSetupOptions deduplicates allow-from entries" {
     try testing.expectEqualStrings("333", opts.allow_from.items[2]);
 }
 
+test "parseTelegramListOptions parses home and account" {
+    const opts = try parseTelegramListOptions(&.{ "--home", "/tmp/volt", "--account", "Work Team" });
+    try testing.expectEqualStrings("/tmp/volt", opts.home_path.?);
+    try testing.expectEqualStrings("Work Team", opts.account.?);
+
+    try testing.expectError(error.UnknownArgument, parseTelegramListOptions(&.{"--bad"}));
+}
+
 test "parseTelegramRunOptions rejects --zolt-path without --zolt" {
     try testing.expectError(
         error.UnexpectedArgument,
@@ -5964,6 +6385,33 @@ test "hydrateZoltDisplayText normalizes provider ping failures" {
     const hydrated = try hydrateZoltDisplayText(allocator, output);
     defer allocator.free(hydrated);
     try testing.expect(std.mem.indexOf(u8, hydrated, "Temporary provider stream error") != null);
+}
+
+test "extractTelegramAccountFromSystemdUnit parses account flag" {
+    const allocator = testing.allocator;
+    const unit =
+        "ExecStart='/usr/local/bin/volt' '--telegram' '--home' '/tmp/volt' '--account' 'default' '--zolt'\n";
+    const parsed = try extractTelegramAccountFromSystemdUnit(allocator, unit);
+    defer if (parsed) |value| allocator.free(value);
+
+    try testing.expect(parsed != null);
+    try testing.expectEqualStrings("default", parsed.?);
+}
+
+test "extractTelegramAccountFromLaunchdPlist parses account flag" {
+    const allocator = testing.allocator;
+    const plist =
+        "<plist><dict><key>ProgramArguments</key><array>" ++
+        "<string>/usr/local/bin/volt</string>" ++
+        "<string>--telegram</string>" ++
+        "<string>--account</string>" ++
+        "<string>work</string>" ++
+        "</array></dict></plist>";
+    const parsed = try extractTelegramAccountFromLaunchdPlist(allocator, plist);
+    defer if (parsed) |value| allocator.free(value);
+
+    try testing.expect(parsed != null);
+    try testing.expectEqualStrings("work", parsed.?);
 }
 
 test "buildVoltBootstrapContext includes workspace guidance and markdown snippets" {

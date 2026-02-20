@@ -164,6 +164,7 @@ volt telegram stop [--home <path>] [--token <token>] [--account <id>] [--dispatc
 volt telegram restart [--home <path>] [--token <token>] [--account <id>] [--dispatch <command>] [--zolt] [--zolt-path <path>] [--zolt-output <text|json|logs|json-stream>] [--poll-ms <ms>]
 volt telegram status [--home <path>] [--token <token>] [--account <id>] [--dispatch <command>] [--zolt] [--zolt-path <path>] [--zolt-output <text|json|logs|json-stream>] [--poll-ms <ms>]
 volt telegram uninstall [--home <path>] [--token <token>] [--account <id>] [--dispatch <command>] [--zolt] [--zolt-path <path>] [--zolt-output <text|json|logs|json-stream>] [--poll-ms <ms>]
+volt telegram list [--home <path>] [--account <id>]
 ```
 
 Notes:
@@ -171,6 +172,7 @@ Notes:
 - Linux uses `systemd --user` units under `$XDG_CONFIG_HOME/systemd/user` (or `~/.config/systemd/user`).
 - macOS uses `~/Library/LaunchAgents/com.volt.telegram.plist`.
 - On macOS, `status` currently reports bootstrap state from `launchctl print`.
+- `list` prints configured accounts, mapped chat counts, service status, and service-bound account.
 
 ### `volt gateway`
 

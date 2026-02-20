@@ -123,6 +123,7 @@ Volt can run Telegram polling as a background service:
 ```bash
 volt telegram install [--home <path>] [--token <token>] [--account <id>] [--dispatch <command>] [--zolt] [--zolt-path <path>] [--zolt-output <text|json|logs|json-stream>] [--poll-ms <ms>]
 volt telegram start|stop|restart|status|uninstall [--home <path>] [--token <token>] [--account <id>] [--dispatch <command>] [--zolt] [--zolt-path <path>] [--zolt-output <text|json|logs|json-stream>] [--poll-ms <ms>]
+volt telegram list [--home <path>] [--account <id>]
 ```
 
 Commands:
@@ -133,6 +134,7 @@ Commands:
 - `restart`: restarts a service.
 - `status`: prints current service status using the native OS service manager.
 - `uninstall`: stops and removes the service definition.
+- `list`: shows configured accounts, mapped chat counts, and which account the service is currently bound to.
 
 Volt can bundle a local `zolt` checkout so `--zolt` can run without a preinstalled system `zolt` binary. When bundling is enabled, Volt prefers:
 
