@@ -2108,6 +2108,19 @@ fn runTelegramThroughZolt(
             false,
         );
         if (!isZoltSessionNotFound(mapped_output)) {
+            const mapped_parsed = parseZoltRunJson(allocator, mapped_output) catch null;
+            if (mapped_parsed) |parsed| {
+                defer deinitZoltRunOutput(allocator, parsed);
+                if (parsed.response.len > 0) {
+                    allocator.free(mapped_output);
+                    if (parsed.session_id.len > 0 and
+                        !std.mem.eql(u8, parsed.session_id, mapped_session))
+                    {
+                        try persistTelegramZoltSessionId(allocator, root, session_key, parsed.session_id);
+                    }
+                    return try allocator.dupe(u8, parsed.response);
+                }
+            }
             return mapped_output;
         }
         allocator.free(mapped_output);
@@ -2196,7 +2209,9 @@ fn extractJsonObject(text: []const u8) ?[]const u8 {
 }
 
 fn isZoltSessionNotFound(output: []const u8) bool {
-    return std.mem.indexOf(u8, output, "session not found:") != null;
+    return std.mem.indexOf(u8, output, "session not found:") != null or
+        std.mem.indexOf(u8, output, "Session not found:") != null or
+        std.mem.indexOf(u8, output, "SESSION NOT FOUND:") != null;
 }
 
 fn runZoltCommandForMessage(
@@ -2257,12 +2272,28 @@ fn runZoltCommandForMessage(
         return try allocator.dupe(u8, result.stdout);
     }
 
-    return try composeChildOutput(
-        allocator,
-        result.stdout,
-        result.stderr,
-        result.term,
-    );
+    switch (result.term) {
+        .Exited => |code| {
+            if (code != 0) {
+                return try composeChildOutput(
+                    allocator,
+                    result.stdout,
+                    result.stderr,
+                    result.term,
+                );
+            }
+        },
+        else => {
+            return try composeChildOutput(
+                allocator,
+                result.stdout,
+                result.stderr,
+                result.term,
+            );
+        },
+    }
+
+    return try allocator.dupe(u8, result.stdout);
 }
 
 fn executeDispatchCommand(allocator: Allocator, argv: []const []const u8, ctx: TelegramDispatchContext) ![]u8 {
