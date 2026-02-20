@@ -252,7 +252,7 @@ const DefaultUpdateCheckJson = "{\"lastCheckedAt\":\"1970-01-01T00:00:00.000Z\"}
 const DefaultTelegramZoltSessionsJson = "{\"version\":1,\"sessions\":[]}";
 const DefaultGatewayToken = "volt-gateway-token";
 const DefaultGatewayBind = "127.0.0.1";
-const TelegramMarkdownParseMode = "MarkdownV2";
+const TelegramMarkdownParseMode = "Markdown";
 const TelegramChatActionTyping = "typing";
 const TelegramTypingPulseMs = 4000;
 
@@ -3177,8 +3177,9 @@ fn sendTelegramMessage(allocator: Allocator, client: *std.http.Client, token: []
     const send_plain = !looksLikeTelegramMarkdown(text);
     if (!send_plain) {
         sendTelegramApiRequest(allocator, client, token, chat_id, text, TelegramMarkdownParseMode) catch |err| {
-            std.log.warn(
-                "volt: telegram markdown send failed ({s}), retrying plain text for chat {d}",
+            debugPrint(
+                allocator,
+                "telegram markdown send failed ({s}), retrying plain text for chat {d}",
                 .{ @errorName(err), chat_id },
             );
             try sendTelegramApiRequest(allocator, client, token, chat_id, text, null);
