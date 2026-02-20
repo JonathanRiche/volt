@@ -253,6 +253,7 @@ const DefaultTelegramZoltSessionsJson = "{\"version\":1,\"sessions\":[]}";
 const DefaultGatewayToken = "volt-gateway-token";
 const DefaultGatewayBind = "127.0.0.1";
 const TelegramMarkdownParseMode = "MarkdownV2";
+const TelegramChatActionTyping = "typing";
 
 const VoltBootstrapTemplateFile = struct {
     relative_path: []const u8,
@@ -1163,6 +1164,13 @@ fn runTelegramGateway(allocator: Allocator, opts: TelegramRunOptions) !void {
                     .account = account,
                     .chat_id = chat.id,
                     .session_key = session_key,
+                };
+
+                sendTelegramChatAction(allocator, &client, token, chat.id, TelegramChatActionTyping) catch |err| {
+                    std.log.warn(
+                        "volt: telegram typing action failed for chat {d} ({s})",
+                        .{ chat.id, @errorName(err) },
+                    );
                 };
 
                 if (extractTelegramSlashCommand(text)) |command| {
@@ -3213,6 +3221,41 @@ fn sendTelegramApiRequest(
         } else {
             try stringify.write(.{ .chat_id = chat_id, .text = text });
         }
+    }
+    const payload = try payload_buf.toOwnedSlice();
+    defer allocator.free(payload);
+
+    const result = try client.fetch(.{
+        .location = .{ .url = url },
+        .method = .POST,
+        .payload = payload,
+        .extra_headers = &[_]std.http.Header{
+            .{ .name = "content-type", .value = "application/json" },
+        },
+    });
+    if (result.status != .ok) {
+        return error.TelegramRequestFailed;
+    }
+}
+
+fn sendTelegramChatAction(
+    allocator: Allocator,
+    client: *std.http.Client,
+    token: []const u8,
+    chat_id: i64,
+    action: []const u8,
+) !void {
+    var url_buf: [768]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "https://api.telegram.org/bot{s}/sendChatAction", .{token});
+
+    var payload_buf = std.Io.Writer.Allocating.init(allocator);
+    defer payload_buf.deinit();
+    {
+        var stringify = std.json.Stringify{ .writer = &payload_buf.writer, .options = .{} };
+        try stringify.write(.{
+            .chat_id = chat_id,
+            .action = action,
+        });
     }
     const payload = try payload_buf.toOwnedSlice();
     defer allocator.free(payload);
