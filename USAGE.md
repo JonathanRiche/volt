@@ -83,6 +83,8 @@ On a first message for a chat, Volt bootstraps a fresh zolt session by prependin
 - session/state file locations
 - markdown guidance files in `.volt`.
 
+Volt sends responses as MarkdownV2 when it detects markdown structure (lists, headings, inline code, fences, links), and falls back to plain text if Telegram rejects the formatted payload.
+
 Slash commands are available in Telegram and are registered as command menu entries:
 
 - `/help` - show quick usage

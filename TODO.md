@@ -19,6 +19,7 @@
   - Resolves command placeholders (`{message}`, `{text}`, `{chat_id}`, `{account}`, `{session}`).
   - Bootstraps and persists `telegram:<account>:<chat_id>` -> zolt `session_id` mappings in `credentials/telegram-zolt-sessions.json`.
   - Recreates stale zolt sessions when `session not found` is returned.
+  - Detects markdown-style replies and sends with Telegram `MarkdownV2`, with automatic plain-text fallback.
   - Handles slash commands (`/help`, `/commands`, `/sessions`, `/status`, `/reset`, `/models`) and registers them as Telegram menu commands.
   - Builds a new-chat bootstrap context from `.volt` markdown guidance and workspace state paths.
 - Session utilities:

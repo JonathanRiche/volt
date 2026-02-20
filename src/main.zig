@@ -252,6 +252,7 @@ const DefaultUpdateCheckJson = "{\"lastCheckedAt\":\"1970-01-01T00:00:00.000Z\"}
 const DefaultTelegramZoltSessionsJson = "{\"version\":1,\"sessions\":[]}";
 const DefaultGatewayToken = "volt-gateway-token";
 const DefaultGatewayBind = "127.0.0.1";
+const TelegramMarkdownParseMode = "MarkdownV2";
 
 const VoltBootstrapTemplateFile = struct {
     relative_path: []const u8,
@@ -3174,6 +3175,30 @@ fn fetchUpdates(
 }
 
 fn sendTelegramMessage(allocator: Allocator, client: *std.http.Client, token: []const u8, chat_id: i64, text: []const u8) !void {
+    const send_plain = !looksLikeTelegramMarkdown(text);
+    if (!send_plain) {
+        sendTelegramApiRequest(allocator, client, token, chat_id, text, TelegramMarkdownParseMode) catch |err| {
+            std.log.warn(
+                "volt: telegram markdown send failed ({s}), retrying plain text for chat {d}",
+                .{ @errorName(err), chat_id },
+            );
+            try sendTelegramApiRequest(allocator, client, token, chat_id, text, null);
+            return;
+        };
+        return;
+    }
+
+    try sendTelegramApiRequest(allocator, client, token, chat_id, text, null);
+}
+
+fn sendTelegramApiRequest(
+    allocator: Allocator,
+    client: *std.http.Client,
+    token: []const u8,
+    chat_id: i64,
+    text: []const u8,
+    parse_mode: ?[]const u8,
+) !void {
     var url_buf: [768]u8 = undefined;
     const url = try std.fmt.bufPrint(&url_buf, "https://api.telegram.org/bot{s}/sendMessage", .{token});
 
@@ -3181,7 +3206,15 @@ fn sendTelegramMessage(allocator: Allocator, client: *std.http.Client, token: []
     defer payload_buf.deinit();
     {
         var stringify = std.json.Stringify{ .writer = &payload_buf.writer, .options = .{} };
-        try stringify.write(.{ .chat_id = chat_id, .text = text });
+        if (parse_mode) |mode| {
+            try stringify.write(.{
+                .chat_id = chat_id,
+                .text = text,
+                .parse_mode = mode,
+            });
+        } else {
+            try stringify.write(.{ .chat_id = chat_id, .text = text });
+        }
     }
     const payload = try payload_buf.toOwnedSlice();
     defer allocator.free(payload);
@@ -3197,6 +3230,29 @@ fn sendTelegramMessage(allocator: Allocator, client: *std.http.Client, token: []
     if (result.status != .ok) {
         return error.TelegramRequestFailed;
     }
+}
+
+fn looksLikeTelegramMarkdown(text: []const u8) bool {
+    const markers = [_][]const u8{
+        "```",
+        "\n* ",
+        "\n- ",
+        "\n+ ",
+        "\n> ",
+        "\n#",
+        "**",
+        "__",
+        "`",
+        "| ",
+        "](",
+    };
+
+    for (markers) |marker| {
+        if (std.mem.indexOf(u8, text, marker) != null) {
+            return true;
+        }
+    }
+    return false;
 }
 
 fn hasDuplicate(allocator: Allocator, entries: []const []const u8, candidate: []const u8) bool {
@@ -4343,6 +4399,13 @@ test "parseZoltRunJson ignores stderr noise around json payload" {
 
     try testing.expectEqualStrings("abc", parsed.session_id);
     try testing.expectEqualStrings("ok", parsed.response);
+}
+
+test "looksLikeTelegramMarkdown detects common markdown structures" {
+    try testing.expect(looksLikeTelegramMarkdown("## Title\n- task"));
+    try testing.expect(looksLikeTelegramMarkdown("`code` snippet"));
+    try testing.expect(!looksLikeTelegramMarkdown("hello world"));
+    try testing.expect(!looksLikeTelegramMarkdown("{\"response\":\"{\\\"cmd\\\":\\\"ls\\\"}\""));
 }
 
 test "isZoltSessionNotFound detects session error output" {

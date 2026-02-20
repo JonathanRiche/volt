@@ -58,6 +58,9 @@ No `--chat-id` is needed for setup; chat ids are discovered from incoming Telegr
 
 Volt also registers a Telegram slash-command menu (`/help`, `/commands`, `/sessions`, `/status`, `/reset`, `/models`) when the gateway starts, so you can discover commands in the Telegram UI.
 
+Volt can render Telegram responses with Markdown formatting when the reply contains markdown markers (lists, headings, backticks, links, fences).
+If Telegram rejects Markdown for a response, Volt automatically retries as plain text.
+
 In Telegram, send:
 - `/help` to view the menu summary
 - `/commands` for the full command list
