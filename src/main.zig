@@ -277,6 +277,7 @@ const TelegramMarkdownParseMode = "Markdown";
 const TelegramChatActionTyping = "typing";
 const TelegramTypingPulseMs = 4000;
 const TelegramMaxImageBytes: usize = 20 * 1024 * 1024;
+const ZoltRetryDelayMs: u64 = 450;
 
 const VoltBootstrapTemplateFile = struct {
     relative_path: []const u8,
@@ -2852,7 +2853,7 @@ fn runTelegramThroughZolt(
     defer if (existing_session_id) |mapped_session| allocator.free(mapped_session);
 
     if (existing_session_id) |mapped_session| {
-        const mapped_output = try runZoltCommandForMessage(
+        const mapped_output = try runZoltCommandForMessageWithRetry(
             allocator,
             zolt_command,
             mapped_session,
@@ -2896,7 +2897,7 @@ fn runTelegramThroughZolt(
         DefaultZoltOutputMode
     else
         zolt_output_mode;
-    const session_output = try runZoltCommandForMessage(
+    const session_output = try runZoltCommandForMessageWithRetry(
         allocator,
         zolt_command,
         null,
@@ -2925,6 +2926,15 @@ fn deinitZoltRunOutput(allocator: Allocator, output: ZoltRunOutput) void {
 }
 
 fn hydrateZoltDisplayText(allocator: Allocator, output: ZoltRunOutput) ![]u8 {
+    if (isZoltProviderPingFailureResponse(output.response)) {
+        if (output.final_response.len > 0) {
+            return try allocator.dupe(u8, output.final_response);
+        }
+        return try allocator.dupe(
+            u8,
+            "Temporary provider stream error (`event: ping`). Please retry, or switch model/provider.",
+        );
+    }
     if (isToolPayloadResponse(allocator, output.response) and output.final_response.len > 0) {
         return try allocator.dupe(u8, output.final_response);
     }
@@ -3036,6 +3046,58 @@ fn isZoltSessionNotFound(output: []const u8) bool {
     return std.mem.indexOf(u8, output, "session not found:") != null or
         std.mem.indexOf(u8, output, "Session not found:") != null or
         std.mem.indexOf(u8, output, "SESSION NOT FOUND:") != null;
+}
+
+fn isZoltProviderPingFailureResponse(response: []const u8) bool {
+    const has_request_failed = std.mem.indexOf(u8, response, "request failed") != null or
+        std.mem.indexOf(u8, response, "Request failed") != null or
+        std.mem.indexOf(u8, response, "openai-compatible request failed") != null;
+    return has_request_failed and std.mem.indexOf(u8, response, "event: ping") != null;
+}
+
+fn isZoltProviderPingFailureOutput(output: []const u8) bool {
+    return isZoltProviderPingFailureResponse(output) or
+        (std.mem.indexOf(u8, output, "openai-compatible request failed") != null and
+            std.mem.indexOf(u8, output, "event: ping") != null);
+}
+
+fn runZoltCommandForMessageWithRetry(
+    allocator: Allocator,
+    zolt_command: []const u8,
+    session_id: ?[]const u8,
+    message: []const u8,
+    output_mode: []const u8,
+) ![]u8 {
+    const first_output = try runZoltCommandForMessage(
+        allocator,
+        zolt_command,
+        session_id,
+        message,
+        output_mode,
+    );
+    if (!isZoltProviderPingFailureOutput(first_output)) return first_output;
+
+    debugPrint(allocator, "zolt ping failure detected; retrying once", .{});
+    const sleep_ns: u64 = ZoltRetryDelayMs * @as(u64, std.time.ns_per_ms);
+    std.Thread.sleep(sleep_ns);
+
+    const retry_output = runZoltCommandForMessage(
+        allocator,
+        zolt_command,
+        session_id,
+        message,
+        output_mode,
+    ) catch |err| {
+        debugPrint(allocator, "zolt retry failed to execute: {s}", .{@errorName(err)});
+        return first_output;
+    };
+    if (isZoltProviderPingFailureOutput(retry_output)) {
+        allocator.free(retry_output);
+        return first_output;
+    }
+
+    allocator.free(first_output);
+    return retry_output;
 }
 
 fn runZoltCommandForMessage(
@@ -4865,6 +4927,31 @@ test "looksLikeTelegramMarkdown detects common markdown structures" {
 test "isZoltSessionNotFound detects session error output" {
     try testing.expect(isZoltSessionNotFound("session not found: telegram:default:1"));
     try testing.expect(!isZoltSessionNotFound("all good"));
+}
+
+test "isZoltProviderPingFailureResponse detects ping failure payload" {
+    try testing.expect(isZoltProviderPingFailureResponse(
+        "[local] Request failed (status=bad_request body=event: ping data: {\"type\":\"ping\"}).",
+    ));
+    try testing.expect(!isZoltProviderPingFailureResponse("normal response"));
+}
+
+test "hydrateZoltDisplayText normalizes provider ping failures" {
+    const allocator = testing.allocator;
+
+    const output = ZoltRunOutput{
+        .session_id = try allocator.dupe(u8, "s1"),
+        .response = try allocator.dupe(
+            u8,
+            "[local] Request failed (status=bad_request body=event: ping data: {\"type\":\"ping\"}).",
+        ),
+        .final_response = try allocator.dupe(u8, ""),
+    };
+    defer deinitZoltRunOutput(allocator, output);
+
+    const hydrated = try hydrateZoltDisplayText(allocator, output);
+    defer allocator.free(hydrated);
+    try testing.expect(std.mem.indexOf(u8, hydrated, "Temporary provider stream error") != null);
 }
 
 test "buildVoltBootstrapContext includes workspace guidance and markdown snippets" {
