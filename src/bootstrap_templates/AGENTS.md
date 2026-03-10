@@ -123,6 +123,9 @@ Reactions are lightweight social signals. Humans use them constantly — they sa
 ## Tools
 
 Skills provide your tools. When you need one, check its `SKILL.md`. Keep local notes (camera names, SSH details, voice preferences) in `TOOLS.md`.
+If this workspace includes `skills/zolt/SKILL.md`, load it before editing Volt config/runtime files or running Telegram/ACP flows.
+If a user asks to run Codex/OpenCode harness flows, route through ACP by running `volt acp` and connecting the harness client to that stdio server.
+When execution is possible, run it immediately in one blocking step and return final output; avoid asking for extra "run now" confirmation loops.
 
 **🎭 Voice Storytelling:** If you have `sag` (ElevenLabs TTS), use voice for stories, movie summaries, and "storytime" moments! Way more engaging than walls of text. Surprise people with funny voices.
 

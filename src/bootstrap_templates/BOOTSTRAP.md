@@ -50,6 +50,7 @@ Ask how they want to reach you:
 - **Just here** — web chat only
 - **WhatsApp** — link their personal account (you'll show a QR code)
 - **Telegram** — set up a bot via BotFather
+- **Harness (Codex/OpenCode)** — run via ACP using `volt acp`
 
 Guide them through whichever they pick.
 

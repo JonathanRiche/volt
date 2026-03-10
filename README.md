@@ -42,7 +42,19 @@ Initialize workspace layout with:
 volt init
 ```
 This creates `volt.json` and seeds default markdown guidance files for the first-run bootstrap:
-`AGENTS.md`, `BOOTSTRAP.md`, `SOUL.md`, `TOOLS.md`, `IDENTITY.md`, `USER.md`, and `HEARTBEAT.md`.
+`AGENTS.md`, `BOOTSTRAP.md`, `SOUL.md`, `TOOLS.md`, `IDENTITY.md`, `USER.md`, `HEARTBEAT.md`, and `skills/zolt/SKILL.md`.
+
+Sync/update those managed docs later without re-running full init:
+
+```bash
+volt docs sync
+```
+
+Use preserve mode to only add missing docs and keep existing files untouched:
+
+```bash
+volt docs sync --no-overwrite
+```
 
 ### Telegram setup (token only)
 
@@ -59,6 +71,30 @@ volt model set --provider openai --model gpt-5-chat-latest
 volt model set --account work --provider opencode --model claude-sonnet-4-6
 volt model show --account work
 ```
+
+### ACP mode (Agent Client Protocol over stdio)
+
+Run Volt as an ACP server backed by zolt:
+
+```bash
+volt acp
+```
+
+Optional overrides:
+
+```bash
+volt acp --zolt-path /path/to/zolt --zolt-output json
+```
+
+Implemented ACP methods:
+- `initialize`
+- `session/new`
+- `session/load`
+- `session/prompt`
+- `session/cancel`
+
+`session/prompt` sends `session/update` notifications with `agent_message_chunk` text and returns `stopReason: "end_turn"`.
+ACP prompt sessions map to zolt sessions in-memory for the lifetime of the `volt acp` process.
 
 `--allow-from` is optional. If omitted, Volt allows all chats to use the bot.
 
@@ -100,7 +136,7 @@ When `--zolt` is enabled, Volt resolves provider/model from config in this order
 1. account config in `volt.json` (`zolt.accounts.<account>.provider/model`)
 2. global config in `volt.json` (`zolt.provider/model`)
 
-Volt also registers a Telegram slash-command menu (`/help`, `/commands`, `/sessions`, `/status`, `/reset`, `/models`, `/model`) when the gateway starts, so you can discover commands in the Telegram UI.
+Volt also registers a Telegram slash-command menu (`/help`, `/commands`, `/settings`, `/sessions`, `/status`, `/reset`, `/models`, `/model`) when the gateway starts, so you can discover commands in the Telegram UI.
 
 Volt can render Telegram responses with Markdown formatting when the reply contains markdown markers (lists, headings, backticks, links, fences).
 If Telegram rejects Markdown for a response, Volt automatically retries as plain text.
@@ -109,6 +145,7 @@ Telegram image attachments are downloaded into `<home>/telegram/media/<account>/
 In Telegram, send:
 - `/help` to view the menu summary
 - `/commands` for the full command list
+- `/settings` to view account/runtime settings and model controls
 - `/sessions` to show the mapped zolt session for this chat
 - `/status` to show runtime details, including last provider/model, token usage, context-left estimate, and compaction count when available from zolt JSON output
 - `/reset` to clear the mapped zolt session

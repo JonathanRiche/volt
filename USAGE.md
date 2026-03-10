@@ -33,7 +33,21 @@ volt init [--mirror-volt] [--source <path>] [--home <path>] [--force]
 - `--force`: overwrite existing files.
 
 `volt init` also seeds workspace guidance markdown templates by default:
-`AGENTS.md`, `BOOTSTRAP.md`, `SOUL.md`, `TOOLS.md`, `IDENTITY.md`, `USER.md`, and `HEARTBEAT.md`.
+`AGENTS.md`, `BOOTSTRAP.md`, `SOUL.md`, `TOOLS.md`, `IDENTITY.md`, `USER.md`, `HEARTBEAT.md`, and `skills/zolt/SKILL.md`.
+
+### `volt docs sync`
+
+Sync managed markdown templates in an existing `.volt` workspace.
+
+```bash
+volt docs sync [--home <path>] [--no-overwrite]
+```
+
+Notes:
+
+- default behavior overwrites managed template docs so existing workspaces pick up latest instructions.
+- `--no-overwrite` only creates missing docs and preserves existing files.
+- this command only targets seeded markdown templates; it does not rewrite runtime JSON state files.
 
 ### `volt model set` / `volt model show`
 
@@ -46,6 +60,30 @@ volt model show [--account <id>] [--home <path>]
 
 - default account writes `zolt.provider` and `zolt.model`.
 - named account writes `zolt.accounts.<account>.provider` and `zolt.accounts.<account>.model`.
+
+### `volt acp`
+
+Run Volt as an ACP server over stdio, backed by zolt.
+
+```bash
+volt acp [--home <path>] [--account <id>] [--zolt-path <path>] [--zolt-output <text|json|logs|json-stream>]
+```
+
+Notes:
+
+- zolt command resolution order is the same as Telegram/gateway:
+1. `--zolt-path` / `VOLT_ZOLT_PATH`
+2. bundled `zolt` next to `volt`
+3. `zolt` on `PATH`
+- provider/model selection is resolved from `volt.json` via `volt model set`.
+- ACP methods implemented:
+1. `initialize`
+2. `session/new`
+3. `session/load`
+4. `session/prompt`
+5. `session/cancel`
+- `session/prompt` emits `session/update` notifications with `agent_message_chunk` text and returns `stopReason: "end_turn"`.
+- ACP session IDs are mapped to zolt sessions in-memory for the lifetime of the `volt acp` process.
 
 ### `volt telegram setup`
 
@@ -102,6 +140,7 @@ Slash commands are available in Telegram and are registered as command menu entr
 
 - `/help` - show quick usage
 - `/commands` - list available commands
+- `/settings` - show account/runtime settings and model controls
 - `/sessions` - show active zolt session for this chat
 - `/status` - show runtime status, plus last provider/model, token usage, context-left estimate, and compaction count if zolt returns usage in JSON
 - `/reset` - clear this chat's zolt session mapping

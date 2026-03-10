@@ -42,6 +42,18 @@ Things like:
 
 Skills are shared. Your setup is yours. Keeping them apart means you can update skills without losing your notes, and share skills without leaking your infrastructure.
 
+## Volt Harness Notes
+
+Track your local Volt command preferences here, for example:
+
+```markdown
+### Volt ACP
+
+- Default command: `volt acp`
+- Alternate home: `volt acp --home ~/.volt`
+- Harness bridge: Use ACP for Codex/OpenCode style harness sessions
+```
+
 ---
 
 Add whatever helps you do your job. This is your cheat sheet.
